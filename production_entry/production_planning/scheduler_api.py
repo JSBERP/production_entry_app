@@ -6981,7 +6981,7 @@ def _width_inch_from_104_item_code(item_code, item_name=""):
 			inm = ""
 	_, wname = _parse_gsm_width_from_item_text(f"{ic} {inm}".strip())
 	if flt(wname) > 0:
-		return round(flt(wname), 1)
+		return round(flt(wname), 2)
 	p = _parse_104_item_code(ic) or {}
 	w = flt(p.get("width_inch") or 0)
 	if w > 0:
@@ -7003,6 +7003,13 @@ def _resolve_planning_row_width_inch(item_code, db_width=0, item_name=""):
 	inm = _cstr(item_name).strip()
 	if not ic:
 		return w
+	# Fabric (100*): always prefer exact width from item name (e.g. W - 42.32), even if
+	# a previously rounded width_inch (42.3) is already stored on the planning row.
+	if ( _item_process_prefix(ic) == "100" or ic.startswith("100") ) and inm:
+		_, wtxt = _parse_gsm_width_from_item_text(f"{ic} {inm}")
+		if flt(wtxt) > 0:
+			w = round(flt(wtxt), 2)
+			return w
 	if w <= 0:
 		lam = _lamination_process_from_item_code(ic)
 		pp = _item_process_prefix(ic)
@@ -7038,7 +7045,6 @@ def _resolve_planning_row_width_inch(item_code, db_width=0, item_name=""):
 			if wc.isdigit():
 				w = _nominal_inch_from_width_code(wc)
 		elif pp == "100" or ic.startswith("100"):
-			gbw = _fabric_gsm_before_width_in_item_text(f"{ic} {inm}")
 			_, wtxt = _parse_gsm_width_from_item_text(f"{ic} {inm}")
 			if wtxt > 0:
 				w = wtxt
@@ -7047,7 +7053,8 @@ def _resolve_planning_row_width_inch(item_code, db_width=0, item_name=""):
 		if wtxt > 0:
 			w = wtxt
 	if w > 0 and not _is_printed_bopp_item_code(ic):
-		rw = round(flt(w), 1)
+		# Keep two decimals so fabric widths like 42.32 / 45.47 are not collapsed to 42.3 / 45.5
+		rw = round(flt(w), 2)
 		return float(int(rw)) if abs(rw - round(rw)) < 1e-9 else rw
 	return w
 
@@ -16330,10 +16337,10 @@ def _parse_gsm_width_from_item_text(raw_text):
 		m_inch = re.search(r"(\d+(?:\.\d+)?)\s*(?:''|\"|[\u2019]{2}|″)", rt)
 		if m_inch:
 			width_pref = flt(m_inch.group(1))
-	# Millimetres in parentheses, e.g. "( 420 MM )" → inches rounded to 0.1"
+	# Millimetres in parentheses, e.g. "( 1075 MM )" → inches to 2 decimals (42.32)
 	mm = re.search(r"\(\s*(\d+)\s*MM\s*\)", rt, re.IGNORECASE)
 	if width_pref <= 0 and mm:
-		width_pref = round(flt(mm.group(1)) / 25.4, 1)
+		width_pref = round(flt(mm.group(1)) / 25.4, 2)
 	clean_txt = raw_text.upper().replace("-", " ").replace("_", " ").replace("(", " ").replace(")", " ")
 	clean_txt = clean_txt.replace("''", " INCH ").replace('"', " INCH ")
 	words = clean_txt.split()
@@ -16360,9 +16367,10 @@ def _parse_gsm_width_from_item_text(raw_text):
 			width = float(w[:-4])
 			break
 	if width_pref > 0:
-		width = width_pref
+		# Keep exact name width (e.g. 42.32 / 45.47); only normalize float noise
+		width = round(flt(width_pref), 2)
 	elif width > 0:
-		width = round(flt(width), 1)
+		width = round(flt(width), 2)
 	return gsm, width
 
 
@@ -16545,7 +16553,7 @@ def _fabric_row_specs_from_fabric_item(fabric_ic, so_it, lam_row):
 	if _is_printed_bopp_item_code(str(fabric_ic or "")):
 		width = 0.0
 	elif flt(width) > 0:
-		rw = round(flt(width), 1)
+		rw = round(flt(width), 2)
 		width = float(int(rw)) if abs(rw - round(rw)) < 1e-9 else rw
 
 	return {
