@@ -245,7 +245,7 @@
                   <span class="lk-da-badge">{{ despatchCardBadge(da) }}</span>
                   <span class="lk-da-id">{{ da.clubbing_sheet || da.name }}</span>
                 </div>
-                <div class="lk-da-row lk-da-date-row" @click.stop>
+                <div class="lk-da-date-row" @click.stop>
                   <span class="lk-da-label">Despatch date</span>
                   <input
                     type="date"
@@ -1946,6 +1946,7 @@ watch([despatchArrangementLocked, approvedArrangementLocked, mode], () => {
   margin: 4px 0 8px;
   padding: 0;
   display: flex;
+  flex-direction: row;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
@@ -1953,10 +1954,17 @@ watch([despatchArrangementLocked, approvedArrangementLocked, mode], () => {
   min-width: 0;
   box-sizing: border-box;
 }
+.lk-da-date-row .lk-da-label {
+  flex: 0 0 100%;
+}
 .lk-da-date-row .lk-da-date-input {
-  flex: 1 1 140px;
-  min-width: 0;
-  max-width: 100%;
+  flex: 0 1 160px;
+  width: auto;
+  min-width: 140px;
+  max-width: 180px;
+  height: 32px;
+  line-height: 1.2;
+  align-self: center;
   box-sizing: border-box;
 }
 .lk-view-rolls-btn {
@@ -1964,11 +1972,13 @@ watch([despatchArrangementLocked, approvedArrangementLocked, mode], () => {
   font-size: 11px !important;
   padding: 4px 8px !important;
   flex: 0 0 auto;
+  align-self: center;
+  height: 32px;
 }
 .lk-da-date-input {
-  max-width: 140px;
+  max-width: 180px;
   font-size: 11px;
-  padding: 2px 6px;
+  padding: 4px 8px;
 }
 .lk-history-go {
   font-size: 12px;
