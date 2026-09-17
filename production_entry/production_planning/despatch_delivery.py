@@ -223,10 +223,11 @@ def _apply_clubbing_transporter_to_dn(dn, despatch_approval):
 			driver, driver_dt, "cell_number", "mobile_no", "phone", "driver_ph_no", "contact_number"
 		)
 	if driver_phone:
-		for fn in ("driver_ph_no", "driver_phone", "driver_ph", "custom_driver_ph_no"):
+		# Prefer custom_driver_ph_no (Logistics Kanban / form field); also set aliases if present.
+		phone_fields = ("custom_driver_ph_no", "driver_ph_no", "driver_phone", "driver_ph")
+		for fn in phone_fields:
 			if _doc_has_field("Delivery Note", fn):
 				_set_dn_field(dn, fn, driver_phone)
-				break
 
 
 def _match_so_detail(sales_order, item_code, qty):

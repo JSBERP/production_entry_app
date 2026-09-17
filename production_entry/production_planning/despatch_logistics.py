@@ -46,6 +46,34 @@ def _user_can_approve_despatch():
 	return bool(roles & DESPATCH_APPROVER_ROLES) or _user_can_approve_transfer()
 
 
+def _clubbing_sheet_transport_fields(club_names):
+	"""Map Clubbing Sheet name → vehicle_no, driver, driver_ph_no for kanban cards."""
+	names = sorted({_cstr(n) for n in (club_names or []) if _cstr(n)})
+	out = {}
+	if not names or not frappe.db.exists("DocType", "Clubbing Sheet"):
+		return out
+	fields = ["name"]
+	for fn in ("vehicle_no", "driver", "driver_ph_no", "driver_phone", "driver_ph"):
+		if frappe.db.has_column("Clubbing Sheet", fn):
+			fields.append(fn)
+	if len(fields) == 1:
+		return out
+	rows = frappe.get_all(
+		"Clubbing Sheet",
+		filters={"name": ["in", names]},
+		fields=fields,
+		limit_page_length=len(names),
+	)
+	for r in rows or []:
+		phone = _cstr(r.get("driver_ph_no") or r.get("driver_phone") or r.get("driver_ph"))
+		out[_cstr(r.name)] = {
+			"vehicle_no": _cstr(r.get("vehicle_no")),
+			"driver": _cstr(r.get("driver")),
+			"driver_ph_no": phone,
+		}
+	return out
+
+
 def _fg_warehouse_for_company(company):
 	wh = TRANSFER_WAREHOUSE_BY_COMPANY.get(_cstr(company))
 	if wh:
@@ -634,6 +662,14 @@ def get_despatch_company_cards(
 			order_by="modified desc",
 			limit_page_length=80,
 		)
+		club_ids_for_transport = []
+		if _has_da_club_field():
+			club_ids_for_transport = [
+				_cstr(a.get("custom_clubbing_sheet"))
+				for a in (approvals or [])
+				if _cstr(a.get("custom_clubbing_sheet"))
+			]
+		club_transport = _clubbing_sheet_transport_fields(club_ids_for_transport)
 		enriched = []
 		for da in approvals or []:
 			despatch_date = _despatch_lane_date(da)
@@ -739,6 +775,7 @@ def get_despatch_company_cards(
 			club_id = _cstr(da.get("custom_clubbing_sheet")) if _has_da_club_field() else ""
 			if not club_id:
 				scan_complete = True
+			transport = club_transport.get(club_id) or {}
 			enriched.append(
 				{
 					"name": da.name,
@@ -763,6 +800,9 @@ def get_despatch_company_cards(
 					"scanned_total": scanned_total,
 					"scan_line_total": line_total,
 					"scan_complete": scan_complete,
+					"vehicle_no": transport.get("vehicle_no") or "",
+					"driver": transport.get("driver") or "",
+					"driver_ph_no": transport.get("driver_ph_no") or "",
 				}
 			)
 		pending = [a for a in enriched if a["status"] in ("Pending Approval", "Draft")]

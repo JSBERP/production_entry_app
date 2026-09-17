@@ -29,7 +29,7 @@ function jsb_show_despatch_rolls_dialog(args) {
 		: itemCode
 			? __("Item: {0}", [itemCode])
 			: "";
-	const docRef = deliveryNote ? __("DN: {0}", [deliveryNote]) : subtitle;
+	const docRef = deliveryNote || subtitle;
 
 	let html =
 		"<style>" +
@@ -46,10 +46,9 @@ function jsb_show_despatch_rolls_dialog(args) {
 		".info-label { background: #f57f17 !important; color: #fff !important; font-size: 8px; font-weight: 700; text-transform: uppercase; padding: 2px 5px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }" +
 		".info-value { font-size: 11px; font-weight: 700; padding: 4px 5px; }" +
 		".dt-table { width: 100%; border-collapse: collapse; border: 1px solid #000 !important; font-size: 10px; }" +
-		".dt-table th { background: #ffb74d !important; border: 1px solid #000 !important; padding: 6px; font-weight: 700; text-transform: uppercase; -webkit-print-color-adjust: exact; print-color-adjust: exact; }" +
+		".dt-table th { background: #ffb74d !important; border: 1px solid #000 !important; padding: 6px; font-weight: 700; text-transform: uppercase; text-align: center; vertical-align: middle; -webkit-print-color-adjust: exact; print-color-adjust: exact; }" +
 		".dt-table td { border: 1px solid #000 !important; padding: 5px 6px; text-align: center; vertical-align: middle; }" +
-		".dt-table tfoot td { background: #c8e6c9 !important; border: 1px solid #000 !important; font-weight: bold; color: #1b5e20 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }" +
-		".tr { text-align: right !important; }" +
+		".dt-table tfoot td { background: #c8e6c9 !important; border: 1px solid #000 !important; font-weight: bold; color: #1b5e20 !important; text-align: center; vertical-align: middle; -webkit-print-color-adjust: exact; print-color-adjust: exact; }" +
 		".fb { font-weight: 700 !important; }" +
 		"@media print { .modal-header, .modal-footer { display: none !important; } .printable-area { width: 100% !important; margin: 0 !important; padding: 0 !important; } body { background: #fff !important; } }" +
 		"</style>";
@@ -58,7 +57,6 @@ function jsb_show_despatch_rolls_dialog(args) {
 	html +=
 		'<table class="company-header-table"><tr><td>' +
 		'<img src="/private/files/JSB LOGO63b225.png" alt="JSB Logo"><br>' +
-		"<h1>Jayashree Spun Bond</h1>" +
 		'<div class="doc-title">' +
 		__("Despatch Roll List") +
 		(docRef ? " | " + docRef : "") +
@@ -150,13 +148,13 @@ function jsb_show_despatch_rolls_dialog(args) {
 			"<td>" +
 			(width || "-") +
 			"</td>" +
-			'<td class="tr">' +
+			"<td>" +
 			mtr.toFixed(1) +
 			"</td>" +
-			'<td class="tr">' +
+			"<td>" +
 			net.toFixed(2) +
 			"</td>" +
-			'<td class="tr">' +
+			"<td>" +
 			gross.toFixed(2) +
 			"</td>" +
 			"</tr>";
@@ -164,16 +162,16 @@ function jsb_show_despatch_rolls_dialog(args) {
 
 	html +=
 		"</tbody><tfoot><tr>" +
-		'<td colspan="7" class="tr fb">' +
+		'<td colspan="7" class="fb">' +
 		__("TOTAL CONSOLIDATED DESPATCH") +
 		"</td>" +
-		'<td class="tr">' +
+		"<td>" +
 		totalMtr.toFixed(1) +
 		"</td>" +
-		'<td class="tr">' +
+		"<td>" +
 		totalNet.toFixed(2) +
 		"</td>" +
-		'<td class="tr">' +
+		"<td>" +
 		totalGross.toFixed(2) +
 		"</td>" +
 		"</tr></tfoot></table></div>";

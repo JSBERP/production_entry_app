@@ -272,6 +272,18 @@
                       <span class="lk-da-label">Scan</span>
                       <span class="lk-da-val">{{ da.scanned_total || 0 }} / {{ da.scan_line_total || 0 }}</span>
                     </div>
+                    <div class="lk-da-row">
+                      <span class="lk-da-label">Vehicle</span>
+                      <span class="lk-da-val">{{ da.vehicle_no || "—" }}</span>
+                    </div>
+                    <div class="lk-da-row">
+                      <span class="lk-da-label">Driver</span>
+                      <span class="lk-da-val">{{ da.driver || "—" }}</span>
+                    </div>
+                    <div class="lk-da-row">
+                      <span class="lk-da-label">Driver Ph</span>
+                      <span class="lk-da-val">{{ da.driver_ph_no || "—" }}</span>
+                    </div>
                   </div>
                   <div class="lk-club-orders" @click.stop>
                     <div
@@ -324,20 +336,12 @@
                       Create Delivery Notes
                     </button>
                     <button
-                      v-else-if="da.has_draft_dns || (da.delivery_notes?.length && !da.all_dns_submitted)"
-                      type="button"
-                      class="lk-dn-btn"
-                      @click="submitClubDns(da)"
-                    >
-                      Submit Delivery Notes
-                    </button>
-                    <button
                       v-else
                       type="button"
                       class="lk-dn-btn lk-dn-btn-done"
                       @click="openDeliveryNote(da)"
                     >
-                      Despatched — Open DN
+                      {{ da.all_dns_submitted ? "Despatched — Open DN" : "Open Delivery Note" }}
                     </button>
                     <div v-if="da.delivery_notes?.length" class="lk-club-dn-list">
                       <span
@@ -1122,24 +1126,6 @@ async function createClubDraftDns(da) {
   }
 }
 
-async function submitClubDns(da) {
-  try {
-    const r = await frappe.call({
-      method: `${DESPATCH_API}.submit_delivery_notes_from_despatch`,
-      args: { name: da.name },
-      freeze: true,
-      freeze_message: __("Submitting Delivery Notes…"),
-    });
-    frappe.show_alert({
-      message: __("Submitted {0} DN(s)", [String((r.message?.submitted || []).length)]),
-      indicator: "green",
-    });
-    await loadDespatchCards();
-  } catch (e) {
-    frappe.msgprint(formatClubScanError(e));
-  }
-}
-
 function openDnForm(dn) {
   if (dn) frappe.set_route("Form", "Delivery Note", dn);
 }
@@ -1536,6 +1522,9 @@ watch([despatchArrangementLocked, approvedArrangementLocked, mode], () => {
   position: relative;
   z-index: 1;
 }
+.lk-mode-despatch .lk-grid {
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+}
 .lk-card-wrap {
   opacity: 0;
   animation: lk-card-in 0.45s ease forwards;
@@ -1745,6 +1734,10 @@ watch([despatchArrangementLocked, approvedArrangementLocked, mode], () => {
   border: 1px solid #bbf7d0;
   background: #f0fdf4;
   cursor: pointer;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 .lk-da-card.is-draft-dn {
   border-color: #fde68a;
@@ -1864,9 +1857,14 @@ watch([despatchArrangementLocked, approvedArrangementLocked, mode], () => {
 }
 .lk-club-scan {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin: 8px 0;
   align-items: stretch;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
 }
 .lk-club-scan-hint {
   font-size: 11px;
@@ -1882,10 +1880,15 @@ watch([despatchArrangementLocked, approvedArrangementLocked, mode], () => {
   border-color: #0f172a !important;
   color: #fff !important;
   font-weight: 700;
-  min-width: 120px;
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
 }
 .lk-club-scan-input {
-  flex: 1;
+  flex: 1 1 160px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 .lk-dn-btn-scan {
   background: #0284c7;
@@ -1899,6 +1902,14 @@ watch([despatchArrangementLocked, approvedArrangementLocked, mode], () => {
   flex-direction: column;
   gap: 8px;
   margin-top: 8px;
+  width: 100%;
+  min-width: 0;
+}
+.lk-club-actions .lk-dn-btn {
+  align-self: stretch;
+  width: 100%;
+  text-align: center;
+  box-sizing: border-box;
 }
 .lk-club-dn-list {
   display: flex;
@@ -1933,16 +1944,26 @@ watch([despatchArrangementLocked, approvedArrangementLocked, mode], () => {
 }
 .lk-da-date-row {
   margin: 4px 0 8px;
-  padding: 0 2px;
+  padding: 0;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.lk-da-date-row .lk-da-date-input {
+  flex: 1 1 140px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 .lk-view-rolls-btn {
   margin-left: auto;
   font-size: 11px !important;
   padding: 4px 8px !important;
+  flex: 0 0 auto;
 }
 .lk-da-date-input {
   max-width: 140px;
