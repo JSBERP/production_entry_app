@@ -16589,6 +16589,14 @@ def _populate_planning_sheet_items(ps, doc):
             ps.custom_company = doc.company
     except Exception:
         pass
+    try:
+        so_name = getattr(doc, "name", None)
+        if so_name and frappe.db.has_column("Sales Order", "custom_production_status"):
+            current = (frappe.db.get_value("Sales Order", so_name, "custom_production_status") or "").strip()
+            if current.lower() in ("", "draft"):
+                frappe.db.set_value("Sales Order", so_name, "custom_production_status", "Confirmed")
+    except Exception:
+        pass
     # Use confirmed field name
     target_field = "planned_items"
     for field in ["planned_items", "custom_planned_items", "planning_table", "custom_planning_table", "table"]:
@@ -24933,25 +24941,22 @@ def _confirm_orders_date_filter_sql(has_custom_planned_date, order_date=None, st
 
 
 def _confirm_orders_eligibility_sql():
-	"""Include confirmed orders for every company on the Sales Order / Planning sheet.
+	"""Show planning sheets on the company from the Sales Order / Planning sheet.
 
-	A sheet belongs on Confirm Orders when:
-	- the Sales Order is submitted (commercially confirmed), or
-	- production status is Confirmed, or
-	- the planning sheet is Finalized / In Production
-	Sheets already converted to a Production Plan (status Planned) stay off this board.
+	Confirm Orders is a company board of submitted sales orders that still need a
+	production plan. Production Status may be Draft (2ZS/2ZZ) or Confirmed (1ZT/1Z0);
+	both must appear. Only Planned/Completed/Cancelled production status is excluded.
 	"""
 	parts = [
 		"p.docstatus < 2",
 		"IFNULL(p.planning_status, '') NOT IN ('Cancelled', 'Completed')",
+		"IFNULL(so.docstatus, 0) = 1",
 	]
-	status_ok = ["IFNULL(so.docstatus, 0) = 1"]
 	if frappe.db.has_column("Sales Order", "custom_production_status"):
-		status_ok.append("so.custom_production_status = 'Confirmed'")
-		parts.append("IFNULL(so.custom_production_status, '') != 'Planned'")
-	if frappe.db.has_column("Planning sheet", "planning_status"):
-		status_ok.append("IFNULL(p.planning_status, '') IN ('Finalized', 'In Production')")
-	parts.append("(" + " OR ".join(status_ok) + ")")
+		parts.append(
+			"LOWER(TRIM(IFNULL(so.custom_production_status, ''))) "
+			"NOT IN ('planned', 'completed', 'cancelled')"
+		)
 	return parts
 
 
