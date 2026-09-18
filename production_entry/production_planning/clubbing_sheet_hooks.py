@@ -254,18 +254,11 @@ def _loading_sequence_locked(doc):
 
 
 def _loading_customer_key(item) -> str:
-	"""One loading slot per customer/order — not per item row."""
-	for key in (
-		"custom_despatch_customer",
-		"despatch_customer",
-		"customer",
-		"party_code",
-		"order_code",
-		"sales_order",
-	):
+	"""One loading slot per order code — not per item row or despatch customer."""
+	for key in ("party_code", "order_code", "sales_order"):
 		val = cstr(item.get(key) or "").strip()
 		if val:
-			return val
+			return val.upper()
 	return cstr(item.get("name") or item.get("idx") or "")
 
 
@@ -289,7 +282,7 @@ def _item_sort_tuple(item, active_belt):
 
 
 def _sequence_labels_for_customer_count(n: int) -> list[str]:
-	"""Inside / Center 1..10 / Outside — one label per distinct customer."""
+	"""Inside / Center 1..10 / Outside — one label per distinct order code."""
 	max_center = 10
 	if n <= 0:
 		return []
@@ -324,26 +317,25 @@ def _set_distances_and_loading_sequence(doc):
 
 	active_belt = _pick_active_belt(_selected_cities(doc))
 
-	# Group rows by customer — one slot per customer (not per item row).
-	groups = {}  # key -> {dist, belt_idx, items}
+	# Group rows by order code — one slot per order (I26125 Inside, all I2694 Outside).
+	groups = {}  # key -> {dist, belt_idx, first_idx, items}
 	order_keys = []
-	for item in items:
+	for row_idx, item in enumerate(items):
 		key = _loading_customer_key(item)
 		dist, belt_idx = _item_sort_tuple(item, active_belt)
 		if key not in groups:
-			groups[key] = {"dist": dist, "belt_idx": belt_idx, "items": []}
+			groups[key] = {"dist": dist, "belt_idx": belt_idx, "first_idx": row_idx, "items": []}
 			order_keys.append(key)
 		else:
 			g = groups[key]
-			# Keep farthest distance for the customer group
 			if dist > g["dist"] or (dist == g["dist"] and belt_idx > g["belt_idx"]):
 				g["dist"], g["belt_idx"] = dist, belt_idx
 		groups[key]["items"].append(item)
 
-	# Farther from Madurai first → Inside (e.g. Namakkal then Karur → Outside)
+	# Farther from Madurai first → Inside. Same city: keep sheet order (first order = Inside).
 	ordered_keys = sorted(
 		order_keys,
-		key=lambda k: (-groups[k]["dist"], -groups[k]["belt_idx"], k),
+		key=lambda k: (-groups[k]["dist"], -groups[k]["belt_idx"], groups[k]["first_idx"]),
 	)
 	labels = _sequence_labels_for_customer_count(len(ordered_keys))
 	for i, key in enumerate(ordered_keys):

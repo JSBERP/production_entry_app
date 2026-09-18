@@ -920,27 +920,22 @@ frappe.ui.form.on('Clubbing Sheet', {
             return;
         }
 
-        // One loading slot per customer/order — not per item row
-        function customerKey(item) {
+        // One loading slot per order code — all item rows of I2694 share Outside, etc.
+        function orderKey(item) {
             return String(
-                item.custom_despatch_customer ||
-                item.despatch_customer ||
-                item.customer ||
                 item.party_code ||
                 item.order_code ||
                 item.sales_order ||
-                item.name ||
-                item.idx ||
                 ''
-            ).trim();
+            ).trim().toUpperCase();
         }
 
         const groups = new Map();
-        items.forEach(item => {
-            const key = customerKey(item) || String(item.idx);
+        items.forEach((item, rowIdx) => {
+            const key = orderKey(item) || String(item.idx || rowIdx);
             const sk = get_sort_key(item);
             if (!groups.has(key)) {
-                groups.set(key, { dist: sk[0], beltIdx: sk[1], items: [] });
+                groups.set(key, { dist: sk[0], beltIdx: sk[1], firstIdx: rowIdx, items: [] });
             } else {
                 const g = groups.get(key);
                 if (sk[0] > g.dist || (sk[0] === g.dist && sk[1] > g.beltIdx)) {
@@ -951,12 +946,12 @@ frappe.ui.form.on('Clubbing Sheet', {
             groups.get(key).items.push(item);
         });
 
-        // Farther from Madurai first → Inside (Namakkal 200 before Karur 140 → Outside)
+        // Farther from Madurai first → Inside. Same city: keep sheet order (first order = Inside).
         const orderedKeys = Array.from(groups.keys()).sort((a, b) => {
             const ga = groups.get(a), gb = groups.get(b);
             if (ga.dist !== gb.dist) return gb.dist - ga.dist;
             if (ga.beltIdx !== gb.beltIdx) return gb.beltIdx - ga.beltIdx;
-            return String(a).localeCompare(String(b));
+            return ga.firstIdx - gb.firstIdx;
         });
 
         const nCust = orderedKeys.length;
