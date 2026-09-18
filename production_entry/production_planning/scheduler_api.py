@@ -24932,6 +24932,29 @@ def _confirm_orders_date_filter_sql(has_custom_planned_date, order_date=None, st
     return None, []
 
 
+def _confirm_orders_eligibility_sql():
+	"""Include confirmed orders for every company on the Sales Order / Planning sheet.
+
+	A sheet belongs on Confirm Orders when:
+	- the Sales Order is submitted (commercially confirmed), or
+	- production status is Confirmed, or
+	- the planning sheet is Finalized / In Production
+	Sheets already converted to a Production Plan (status Planned) stay off this board.
+	"""
+	parts = [
+		"p.docstatus < 2",
+		"IFNULL(p.planning_status, '') NOT IN ('Cancelled', 'Completed')",
+	]
+	status_ok = ["IFNULL(so.docstatus, 0) = 1"]
+	if frappe.db.has_column("Sales Order", "custom_production_status"):
+		status_ok.append("so.custom_production_status = 'Confirmed'")
+		parts.append("IFNULL(so.custom_production_status, '') != 'Planned'")
+	if frappe.db.has_column("Planning sheet", "planning_status"):
+		status_ok.append("IFNULL(p.planning_status, '') IN ('Finalized', 'In Production')")
+	parts.append("(" + " OR ".join(status_ok) + ")")
+	return parts
+
+
 _CONFIRM_ORDERS_FG_PARENT_FABRICS = frozenset({"Bag FG", "FG Fabric", "FG Sheet"})
 _CONFIRM_ORDERS_PCS_UOMS = frozenset({"nos", "pcs", "pieces", "piece", "pc"})
 _CONFIRM_ORDERS_KG_UOMS = frozenset({"kg", "kilogram", "kilograms"})
@@ -25081,18 +25104,13 @@ def _summarize_fg_qty_for_planning_sheets(sheet_rows):
 
 
 def _get_confirm_orders_company_kanban_impl(order_date=None, start_date=None, end_date=None, order_code=None, customer=None, unit=None):
-    """Planning Sheets (SO custom_production_status = 'Confirmed') grouped per company card."""
-    if not frappe.db.has_column("Sales Order", "custom_production_status"):
-        frappe.log_error(
-            "Sales Order missing custom_production_status; Confirm Orders kanban cannot filter.",
-            "get_confirm_orders_company_kanban",
-        )
-        return {"companies": [], "unitOptions": _get_confirm_orders_unit_options_list()}
-
+    """Planning sheets grouped by Sales Order / Planning sheet company for every company."""
     has_ps_company = frappe.db.has_column("Planning sheet", "custom_company")
     has_custom_planned_date = frappe.db.has_column("Planning sheet", "custom_planned_date")
     company_expr = (
-        "COALESCE(NULLIF(p.custom_company, ''), so.company)" if has_ps_company else "so.company"
+        "COALESCE(NULLIF(TRIM(p.custom_company), ''), NULLIF(TRIM(so.company), ''))"
+        if has_ps_company
+        else "NULLIF(TRIM(so.company), '')"
     )
     dod_expr = "p.dod" if frappe.db.has_column("Planning sheet", "dod") else "NULL"
     so_status_sel = "so.delivery_status" if frappe.db.has_column("Sales Order", "delivery_status") else "NULL"
@@ -25105,7 +25123,7 @@ def _get_confirm_orders_company_kanban_impl(order_date=None, start_date=None, en
     else:
         eff = "COALESCE(MAX(NULLIF(i.planned_date, '')), NULLIF(p.ordered_date, ''), so.transaction_date)"
 
-    conditions = ["p.docstatus < 2", "so.custom_production_status = 'Confirmed'"]
+    conditions = _confirm_orders_eligibility_sql()
     values = []
 
     if order_code:
@@ -25144,7 +25162,7 @@ def _get_confirm_orders_company_kanban_impl(order_date=None, start_date=None, en
             GROUP_CONCAT(DISTINCT NULLIF(i.unit, '') ORDER BY NULLIF(i.unit, '') SEPARATOR ', ') AS units,
             {eff} AS effective_date
         FROM `tabPlanning sheet` p
-        JOIN `tabSales Order` so ON so.name = p.sales_order
+        LEFT JOIN `tabSales Order` so ON so.name = p.sales_order
         LEFT JOIN `tabCustomer` c ON c.name = p.customer
         LEFT JOIN `tabPlanning Table` i ON i.parent = p.name
         WHERE {where_clause}

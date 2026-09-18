@@ -4,7 +4,7 @@
     <div class="co-hero">
       <div class="co-hero-text">
         <h2 class="co-title">Confirm Orders</h2>
-        <p class="co-subtitle">Confirmed planning sheets per company — sales order production status = Confirmed</p>
+        <p class="co-subtitle">Planning sheets grouped by Sales Order / Planning sheet company</p>
       </div>
       <div class="co-hero-stats">
         <div class="co-hero-stat">
@@ -133,7 +133,7 @@ const CARD_COLORS = [
   "#7c3aed", "#0d9488", "#be185d", "#65a30d", "#475569",
 ];
 
-const viewScope = ref("daily");
+const viewScope = ref("all");
 const filterDate = ref(frappe.datetime.get_today());
 const filterWeek = ref("");
 const filterMonth = ref("");
@@ -210,7 +210,7 @@ function onScopeChange() {
 }
 
 function clearFilters() {
-  viewScope.value = "daily";
+  viewScope.value = "all";
   filterDate.value = frappe.datetime.get_today();
   filterWeek.value = "";
   filterMonth.value = "";
