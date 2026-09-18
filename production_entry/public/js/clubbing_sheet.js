@@ -200,9 +200,173 @@ function get_distance_from_madurai(city) {
 
 const PLANNING_ORDERS_API = 'production_entry.production_planning.clubbing_api.get_planning_orders_for_clubbing';
 const DISTANCES_API = 'production_entry.production_planning.clubbing_api.get_distances_from_madurai';
-window.JSB_CLUB_PICKER_VER = 'v20260826a';
+window.JSB_CLUB_PICKER_VER = 'v20260918c';
 // Always refresh helpers even if form.on already registered (old Client Script may open picker)
 window.__JSB_CLUB_SHEET_JS__ = window.JSB_CLUB_PICKER_VER;
+
+window.jsb_club_install_sequence_override = function (frm) {
+	const apply = function (f) {
+		window.jsb_club_apply_loading_sequence(f || frm);
+	};
+	try {
+		const h = frappe.ui.form.handlers && frappe.ui.form.handlers['Clubbing Sheet'];
+		if (h) {
+			h.calculate_loading_sequence = [apply];
+		}
+	} catch (e) { /* ignore */ }
+	if (frm && frm.script_manager && frm.script_manager.events) {
+		frm.script_manager.events.calculate_loading_sequence = [apply];
+	}
+	if (frm && frm.cscript) {
+		frm.cscript.calculate_loading_sequence = apply;
+	}
+	if (frm && frm.events) {
+		frm.events.calculate_loading_sequence = apply;
+	}
+};
+
+window.jsb_club_apply_loading_sequence = function (frm) {
+	if (!frm || !frm.doc) return;
+	if (typeof jsb_club_loading_sequence_locked === 'function' && jsb_club_loading_sequence_locked(frm)) {
+		frm.refresh_field('items');
+		return;
+	}
+	let items = frm.doc.items || [];
+	if (!items.length) {
+		frm.refresh_field('items');
+		return;
+	}
+
+	let all_belt_cities = new Set();
+	ROUTE_BELTS.forEach(belt => belt.forEach(c => all_belt_cities.add(c)));
+
+	function get_city(item) {
+		return (item.party_location || '').trim().toLowerCase();
+	}
+
+	let known_cities = new Set();
+	items.forEach(item => {
+		let city = get_city(item);
+		if (!city) return;
+		for (let bc of all_belt_cities) {
+			if (city === bc || city.includes(bc) || bc.includes(city)) {
+				known_cities.add(city);
+				break;
+			}
+		}
+	});
+
+	let active_belt = null;
+	for (let belt of ROUTE_BELTS) {
+		let all_match = true;
+		for (let city of known_cities) {
+			let found = false;
+			for (let bc of belt) {
+				if (city === bc || city.includes(bc) || bc.includes(city)) { found = true; break; }
+			}
+			if (!found) { all_match = false; break; }
+		}
+		if (all_match && known_cities.size > 0) {
+			active_belt = belt;
+			break;
+		}
+	}
+	if (!active_belt) {
+		let max_matches = 0;
+		for (let belt of ROUTE_BELTS) {
+			let count = 0;
+			for (let city of known_cities) {
+				for (let bc of belt) {
+					if (city === bc || city.includes(bc) || bc.includes(city)) { count++; break; }
+				}
+			}
+			if (count > max_matches) { max_matches = count; active_belt = belt; }
+		}
+	}
+
+	function get_sort_key(item) {
+		let city = get_city(item);
+		let dist = flt(item.distance_from_madurai) || get_distance_from_madurai(item.party_location);
+		let beltIdx = 0;
+		if (active_belt) {
+			for (let idx = 0; idx < active_belt.length; idx++) {
+				let bc = active_belt[idx];
+				if (city === bc || city.includes(bc) || bc.includes(city)) {
+					beltIdx = idx;
+					break;
+				}
+			}
+		}
+		return [dist, beltIdx];
+	}
+
+	if (frm.doc.load_type === 'Full Load') {
+		items.forEach(item => { item.loading_sequence = 'Full Load'; });
+		items.forEach((item, idx) => { item.idx = idx + 1; });
+		frm.refresh_field('items');
+		return;
+	}
+
+	function orderKey(item) {
+		return String(
+			item.party_code ||
+			item.order_code ||
+			item.custom_party_code ||
+			item.sales_order ||
+			''
+		).trim().toUpperCase();
+	}
+
+	const groups = new Map();
+	items.forEach((item, rowIdx) => {
+		const key = orderKey(item) || String(item.idx || rowIdx);
+		const sk = get_sort_key(item);
+		if (!groups.has(key)) {
+			groups.set(key, { dist: sk[0], beltIdx: sk[1], firstIdx: rowIdx, items: [] });
+		} else {
+			const g = groups.get(key);
+			if (sk[0] > g.dist || (sk[0] === g.dist && sk[1] > g.beltIdx)) {
+				g.dist = sk[0];
+				g.beltIdx = sk[1];
+			}
+		}
+		groups.get(key).items.push(item);
+	});
+
+	const orderedKeys = Array.from(groups.keys()).sort((a, b) => {
+		const ga = groups.get(a), gb = groups.get(b);
+		if (ga.dist !== gb.dist) return gb.dist - ga.dist;
+		if (ga.beltIdx !== gb.beltIdx) return gb.beltIdx - ga.beltIdx;
+		return ga.firstIdx - gb.firstIdx;
+	});
+
+	const nOrd = orderedKeys.length;
+	let labels = [];
+	if (nOrd === 1) {
+		labels = ['Full Load'];
+	} else if (nOrd === 2) {
+		labels = ['Inside', 'Outside'];
+	} else {
+		labels = ['Inside'];
+		for (let i = 0; i < nOrd - 2; i++) {
+			labels.push('Center ' + Math.min(i + 1, 10));
+		}
+		labels.push('Outside');
+	}
+
+	const flat = [];
+	orderedKeys.forEach((key, i) => {
+		const seq = labels[i] || ('Center ' + Math.min(i, 10));
+		groups.get(key).items.forEach(item => {
+			item.loading_sequence = seq;
+			flat.push(item);
+		});
+	});
+
+	flat.forEach((item, idx) => { item.idx = idx + 1; });
+	frm.doc.items = flat;
+	frm.refresh_field('items');
+};
 
 /** Add selected Planning rows — direct call; never depends on frm.events.process_selections. */
 window.jsb_club_add_selected_items = function (frm, selections, orders_cache) {
@@ -226,7 +390,8 @@ window.jsb_club_add_selected_items = function (frm, selections, orders_cache) {
 			rd.customer = so.customer;
 			rd.customer_name = so.customer_name || so.customer;
 			rd.sales_order = so.sales_order || '';
-			rd.party_code = so.party_code || so.custom_party_code || '';
+			rd.party_code = so.party_code || so.custom_party_code || so.order_code || '';
+			rd.order_code = rd.party_code;
 			rd.weight_kgs = flt(so.weight_kgs || so.total_qty);
 			rd.no_of_rolls = flt(so.no_of_rolls);
 			rd.party_location = so.city || '';
@@ -277,6 +442,8 @@ window.jsb_club_add_selected_items = function (frm, selections, orders_cache) {
 			jsb_club_clear_loading_sequence_lock(frm);
 			frm.trigger('recalculate_load_type');
 			frm.refresh_field('items');
+			setTimeout(function () { window.jsb_club_apply_loading_sequence(frm); }, 0);
+			setTimeout(function () { window.jsb_club_apply_loading_sequence(frm); }, 150);
 		}
 
 		if (!cities.length) {
@@ -478,11 +645,13 @@ function jsb_club_hide_view_rolls(frm) {
 frappe.ui.form.on('Clubbing Sheet', {
     refresh: function (frm) {
         jsb_club_bind_picker_button(frm);
+        jsb_club_install_sequence_override(frm);
         // Rebind several times so we win over any old Enabled Client Script on the site
         [200, 500, 1000, 2000].forEach(function (ms) {
             setTimeout(function () {
                 if (cur_frm && cur_frm === frm) {
                     jsb_club_bind_picker_button(frm);
+                    jsb_club_install_sequence_override(frm);
                 }
             }, ms);
         });
@@ -839,148 +1008,7 @@ frappe.ui.form.on('Clubbing Sheet', {
     },
 
     calculate_loading_sequence: function (frm) {
-        if (jsb_club_loading_sequence_locked(frm)) {
-            frm.refresh_field('items');
-            return;
-        }
-        let items = frm.doc.items || [];
-        if (!items.length) {
-            frm.refresh_field('items');
-            return;
-        }
-
-        let all_belt_cities = new Set();
-        ROUTE_BELTS.forEach(belt => belt.forEach(c => all_belt_cities.add(c)));
-
-        function get_city(item) {
-            return (item.party_location || '').trim().toLowerCase();
-        }
-
-        let known_cities = new Set();
-        items.forEach(item => {
-            let city = get_city(item);
-            if (!city) return;
-            for (let bc of all_belt_cities) {
-                if (city === bc || city.includes(bc) || bc.includes(city)) {
-                    known_cities.add(city);
-                    break;
-                }
-            }
-        });
-
-        let active_belt = null;
-        for (let belt of ROUTE_BELTS) {
-            let all_match = true;
-            for (let city of known_cities) {
-                let found = false;
-                for (let bc of belt) {
-                    if (city === bc || city.includes(bc) || bc.includes(city)) { found = true; break; }
-                }
-                if (!found) { all_match = false; break; }
-            }
-            if (all_match && known_cities.size > 0) {
-                active_belt = belt;
-                break;
-            }
-        }
-        if (!active_belt) {
-            let max_matches = 0;
-            for (let belt of ROUTE_BELTS) {
-                let count = 0;
-                for (let city of known_cities) {
-                    for (let bc of belt) {
-                        if (city === bc || city.includes(bc) || bc.includes(city)) { count++; break; }
-                    }
-                }
-                if (count > max_matches) { max_matches = count; active_belt = belt; }
-            }
-        }
-
-        // Distance primary (farther → Inside). Belt index only ties distances.
-        function get_sort_key(item) {
-            let city = get_city(item);
-            let dist = flt(item.distance_from_madurai) || get_distance_from_madurai(item.party_location);
-            let beltIdx = 0;
-            if (active_belt) {
-                for (let idx = 0; idx < active_belt.length; idx++) {
-                    let bc = active_belt[idx];
-                    if (city === bc || city.includes(bc) || bc.includes(city)) {
-                        beltIdx = idx;
-                        break;
-                    }
-                }
-            }
-            return [dist, beltIdx];
-        }
-
-        if (frm.doc.load_type === 'Full Load') {
-            items.forEach(item => { item.loading_sequence = 'Full Load'; });
-            items.forEach((item, idx) => { item.idx = idx + 1; });
-            frm.refresh_field('items');
-            return;
-        }
-
-        // One loading slot per order code — all item rows of I2694 share Outside, etc.
-        function orderKey(item) {
-            return String(
-                item.party_code ||
-                item.order_code ||
-                item.sales_order ||
-                ''
-            ).trim().toUpperCase();
-        }
-
-        const groups = new Map();
-        items.forEach((item, rowIdx) => {
-            const key = orderKey(item) || String(item.idx || rowIdx);
-            const sk = get_sort_key(item);
-            if (!groups.has(key)) {
-                groups.set(key, { dist: sk[0], beltIdx: sk[1], firstIdx: rowIdx, items: [] });
-            } else {
-                const g = groups.get(key);
-                if (sk[0] > g.dist || (sk[0] === g.dist && sk[1] > g.beltIdx)) {
-                    g.dist = sk[0];
-                    g.beltIdx = sk[1];
-                }
-            }
-            groups.get(key).items.push(item);
-        });
-
-        // Farther from Madurai first → Inside. Same city: keep sheet order (first order = Inside).
-        const orderedKeys = Array.from(groups.keys()).sort((a, b) => {
-            const ga = groups.get(a), gb = groups.get(b);
-            if (ga.dist !== gb.dist) return gb.dist - ga.dist;
-            if (ga.beltIdx !== gb.beltIdx) return gb.beltIdx - ga.beltIdx;
-            return ga.firstIdx - gb.firstIdx;
-        });
-
-        const nCust = orderedKeys.length;
-        const maxCenter = 10;
-        let labels = [];
-        if (nCust === 1) {
-            labels = ['Full Load'];
-        } else if (nCust === 2) {
-            labels = ['Inside', 'Outside'];
-        } else {
-            labels = ['Inside'];
-            for (let i = 0; i < nCust - 2; i++) {
-                labels.push('Center ' + Math.min(i + 1, maxCenter));
-            }
-            labels.push('Outside');
-        }
-
-        const flat = [];
-        orderedKeys.forEach((key, i) => {
-            const seq = labels[i] || ('Center ' + Math.min(i, maxCenter));
-            groups.get(key).items.forEach(item => {
-                item.loading_sequence = seq;
-                flat.push(item);
-            });
-        });
-
-        flat.forEach((item, idx) => { item.idx = idx + 1; });
-        frm.doc.items = flat;
-        frm.refresh_field('items');
+        window.jsb_club_apply_loading_sequence(frm);
     }
 });
 
