@@ -255,11 +255,11 @@ def _loading_sequence_locked(doc):
 
 def _loading_customer_key(item) -> str:
 	"""One loading slot per order code — not per item row or despatch customer."""
-	for key in ("party_code", "order_code", "sales_order"):
+	for key in ("party_code", "order_code", "custom_party_code", "custom_order_code", "sales_order"):
 		val = cstr(item.get(key) or "").strip()
 		if val:
 			return val.upper()
-	return cstr(item.get("name") or item.get("idx") or "")
+	return "ROW:" + cstr(item.get("name") or item.get("idx") or "")
 
 
 def _item_sort_tuple(item, active_belt):
@@ -282,12 +282,15 @@ def _item_sort_tuple(item, active_belt):
 
 
 def _sequence_labels_for_customer_count(n: int) -> list[str]:
-	"""Inside / Center 1..10 / Outside — one label per distinct order code."""
+	"""Inside / Center 1..10 / Outside — one label per distinct order code (Part Load).
+
+	Never returns Full Load here — that label is only set when load_type is Full Load.
+	"""
 	max_center = 10
 	if n <= 0:
 		return []
 	if n == 1:
-		return ["Full Load"]
+		return ["Inside"]
 	if n == 2:
 		return ["Inside", "Outside"]
 	labels = ["Inside"]

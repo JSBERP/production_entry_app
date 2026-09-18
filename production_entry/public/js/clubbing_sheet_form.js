@@ -200,7 +200,7 @@ function get_distance_from_madurai(city) {
 
 const PLANNING_ORDERS_API = 'production_entry.production_planning.clubbing_api.get_planning_orders_for_clubbing';
 const DISTANCES_API = 'production_entry.production_planning.clubbing_api.get_distances_from_madurai';
-window.JSB_CLUB_PICKER_VER = 'v20260918c';
+window.JSB_CLUB_PICKER_VER = 'v20260918d';
 // Always refresh helpers even if form.on already registered (old Client Script may open picker)
 window.__JSB_CLUB_SHEET_JS__ = window.JSB_CLUB_PICKER_VER;
 
@@ -300,6 +300,7 @@ window.jsb_club_apply_loading_sequence = function (frm) {
 		return [dist, beltIdx];
 	}
 
+	// Full Load truck type → every line is Full Load. Part Load never uses that label.
 	if (frm.doc.load_type === 'Full Load') {
 		items.forEach(item => { item.loading_sequence = 'Full Load'; });
 		items.forEach((item, idx) => { item.idx = idx + 1; });
@@ -312,6 +313,7 @@ window.jsb_club_apply_loading_sequence = function (frm) {
 			item.party_code ||
 			item.order_code ||
 			item.custom_party_code ||
+			item.custom_order_code ||
 			item.sales_order ||
 			''
 		).trim().toUpperCase();
@@ -319,7 +321,8 @@ window.jsb_club_apply_loading_sequence = function (frm) {
 
 	const groups = new Map();
 	items.forEach((item, rowIdx) => {
-		const key = orderKey(item) || String(item.idx || rowIdx);
+		// Prefer order code; never collapse different blank rows into one "Full Load" group.
+		const key = orderKey(item) || ('ROW:' + String(item.name || item.idx || rowIdx));
 		const sk = get_sort_key(item);
 		if (!groups.has(key)) {
 			groups.set(key, { dist: sk[0], beltIdx: sk[1], firstIdx: rowIdx, items: [] });
@@ -342,8 +345,9 @@ window.jsb_club_apply_loading_sequence = function (frm) {
 
 	const nOrd = orderedKeys.length;
 	let labels = [];
-	if (nOrd === 1) {
-		labels = ['Full Load'];
+	// Part Load: one slot per order code. Never label Part Load rows as "Full Load".
+	if (nOrd <= 1) {
+		labels = ['Inside'];
 	} else if (nOrd === 2) {
 		labels = ['Inside', 'Outside'];
 	} else {
@@ -791,19 +795,28 @@ frappe.ui.form.on('Clubbing Sheet', {
         let full_load_customers = customers.filter(c => customer_weights[c] >= 5000);
 
         // Soft warn when ≥5000 kg customer is mixed with others — still Part Load so save works.
+        let nextType = '';
         if (full_load_customers.length && customers.length > 1) {
-            frm.set_value('load_type', 'Part Load');
+            nextType = 'Part Load';
         } else if (full_load_customers.length) {
-            frm.set_value('load_type', 'Full Load');
+            nextType = 'Full Load';
         } else if (customers.length >= 1) {
-            frm.set_value('load_type', 'Part Load');
-        } else {
-            frm.set_value('load_type', '');
+            nextType = 'Part Load';
         }
 
-        frm.trigger('show_load_type_indicator');
-        frm.trigger('toggle_loading_sequence_visibility');
-        frm.trigger('calculate_loading_sequence');
+        const applySeq = function () {
+            frm.trigger('show_load_type_indicator');
+            frm.trigger('toggle_loading_sequence_visibility');
+            window.jsb_club_apply_loading_sequence(frm);
+        };
+
+        // set_value is async — apply sequence only after load_type is committed
+        // so Part Load never gets stuck with Full Load sequence labels.
+        if ((frm.doc.load_type || '') === nextType) {
+            applySeq();
+        } else {
+            frm.set_value('load_type', nextType).then(applySeq);
+        }
     },
 
     jsb_pick_despatch_planning_rows: function (frm) {
