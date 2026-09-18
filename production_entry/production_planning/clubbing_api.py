@@ -244,21 +244,54 @@ def get_planning_orders_for_clubbing(party_code=None, planned_date=None, custome
 	return out
 
 
+def _discard_password_decrypt_messages():
+	"""frappe.throw still leaves entries in message_log after we catch them."""
+	try:
+		log = getattr(frappe.local, "message_log", None)
+		if not log:
+			return
+		kept = []
+		needles = (
+			"encrypt",
+			"password not found",
+			"site_config.json",
+			"google_api_key",
+			"google_maps_api_key",
+			"routes_api_key",
+			"jsb integrations",
+		)
+		for m in log:
+			if isinstance(m, dict):
+				text = str(m.get("message") or m.get("title") or m)
+			else:
+				text = str(m)
+			low = text.lower()
+			if any(n in low for n in needles):
+				continue
+			kept.append(m)
+		frappe.local.message_log = kept
+	except Exception:
+		pass
+
+
 def _google_api_key():
-	"""Read key from JSB Integrations (Password-safe) or site_config."""
+	"""Read key from JSB Integrations (Password-safe) or site_config. Never surface decrypt errors."""
 	key = ""
 	if frappe.db.exists("DocType", "JSB Integrations"):
-		# Try common Password field names
 		for fieldname in ("google_api_key", "google_maps_api_key", "routes_api_key"):
 			try:
 				key = (
 					frappe.utils.password.get_decrypted_password(
-						"JSB Integrations", "JSB Integrations", fieldname=fieldname
+						"JSB Integrations",
+						"JSB Integrations",
+						fieldname=fieldname,
+						raise_exception=False,
 					)
 					or ""
 				)
 			except Exception:
 				key = ""
+			_discard_password_decrypt_messages()
 			if key:
 				break
 		if not key:
@@ -271,6 +304,7 @@ def _google_api_key():
 					break
 	if not key:
 		key = frappe.conf.get("google_maps_api_key") or frappe.conf.get("google_api_key") or ""
+	_discard_password_decrypt_messages()
 	return _cstr(key)
 
 
