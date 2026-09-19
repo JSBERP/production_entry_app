@@ -7749,7 +7749,7 @@ async function backfillSessionSprLabelTypes() {
     missing.map(async ([ppId, s]) => {
       try {
         const headers = await gsmSprHeaders([s.spr_name]);
-        const lt = headers[s.spr_name]?.custom_label;
+        const lt = headers[s.spr_name]?.label_type || headers[s.spr_name]?.custom_label;
         if (lt) {
           next[ppId] = { ...s, pp_id: ppId, label_type: lt };
           changed = true;

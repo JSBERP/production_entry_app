@@ -31,6 +31,7 @@ from production_entry.production_planning.doctype.shaft_production_run.shaft_pro
 	resolve_label_from_pp_doc,
 	resolve_label_from_planning_sheet_doc,
 	normalize_label_template_link,
+	get_label_template_print_spec,
 	save_gsm_roll_line_to_spr,
 	spr_doc_is_mix_roll,
 	spr_get_tolerance_violations,
@@ -1158,11 +1159,13 @@ def _gsm_label_type_display(raw: str) -> str:
 
 
 def _gsm_label_type_for_pp_spr(pp_id: str | None = None, spr_name: str | None = None) -> str:
-	"""Resolve label type for GSM — Production Plan header, then SPR custom_label."""
+	"""Resolve label type for GSM — SPR Label Template first, then Production Plan."""
 	pp_id = _cstr(pp_id).strip()
 	spr_name = _cstr(spr_name).strip()
 	label = ""
-	if pp_id and frappe.db.exists("Production Plan", pp_id):
+	if spr_name and frappe.db.exists("Shaft Production Run", spr_name):
+		label = _spr_pick_doc_field(frappe.get_doc("Shaft Production Run", spr_name), "custom_label")
+	if not label and pp_id and frappe.db.exists("Production Plan", pp_id):
 		pp = frappe.get_doc("Production Plan", pp_id)
 		label = resolve_label_from_pp_doc(pp)
 		if not label:
@@ -1175,8 +1178,6 @@ def _gsm_label_type_for_pp_spr(pp_id: str | None = None, spr_name: str | None = 
 					label = resolve_label_from_planning_sheet_doc(frappe.get_doc("Planning sheet", sheet_name))
 					if label:
 						break
-	if not label and spr_name and frappe.db.exists("Shaft Production Run", spr_name):
-		label = _spr_pick_doc_field(frappe.get_doc("Shaft Production Run", spr_name), "custom_label")
 	return _gsm_label_type_display(label)
 
 
@@ -4456,7 +4457,11 @@ def get_gsm_spr_doc(spr_name):
 	spr_name = _cstr(spr_name).strip()
 	if not spr_name or not frappe.db.exists("Shaft Production Run", spr_name):
 		frappe.throw(_("Shaft Production Run not found"))
-	return frappe.get_doc("Shaft Production Run", spr_name).as_dict()
+	d = frappe.get_doc("Shaft Production Run", spr_name).as_dict()
+	spec = get_label_template_print_spec(d.get("custom_label"))
+	if spec:
+		d["_label_template"] = spec
+	return d
 
 
 @frappe.whitelist(methods=["GET", "POST"])
@@ -4478,6 +4483,7 @@ def get_gsm_spr_headers(spr_names=None):
 			continue
 		row = frappe.db.get_value("Shaft Production Run", name, fields, as_dict=True) or {}
 		if row.get("name"):
+			row["label_type"] = _gsm_label_type_display(row.get("custom_label") or "")
 			out.append(row)
 	return {"sprs": out}
 

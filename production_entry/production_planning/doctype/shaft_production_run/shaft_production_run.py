@@ -1675,6 +1675,143 @@ def normalize_label_template_link(value: str) -> str:
 	return v
 
 
+_LABEL_TEMPLATE_FLAG_MAP = (
+	("show_company", ("show_company", "company", "company_name", "header_company"), ("company name", "company")),
+	("show_email", ("show_email", "email", "company_email"), ("company email", "email")),
+	("show_customer", ("show_customer", "customer", "customer_name"), ("customer name", "customer")),
+	("show_quality", ("show_quality", "quality"), ("quality",)),
+	("show_order_code", ("show_order_code", "order_code", "party_code"), ("order code", "party code")),
+	("show_gsm", ("show_gsm", "gsm"), ("gsm",)),
+	("show_color", ("show_color", "color", "colour"), ("color", "colour")),
+	("show_length", ("show_length", "length"), ("length",)),
+	("show_width", ("show_width", "width"), ("width",)),
+	("show_gw", ("show_gw", "cross_weight", "gross_weight", "show_cross_weight", "show_gross_weight"), ("cross weight", "gross weight")),
+	("show_nw", ("show_nw", "net_weight", "show_net_weight"), ("net weight",)),
+	("show_batch", ("show_batch", "batch_no", "batch", "show_batch_no"), ("batch no", "batch")),
+	("show_barcode", ("show_barcode", "barcode"), ("barcode",)),
+)
+
+_LABEL_TEMPLATE_SIZE_FIELDS = (
+	"label_size",
+	"size",
+	"sticker_size",
+	"print_size",
+	"label_dimension",
+	"dimensions",
+	"paper_size",
+	"width_height",
+)
+
+
+def _label_template_parse_size(raw) -> dict:
+	text = _cstr(raw)
+	m = re.search(
+		r"(\d+(?:\.\d+)?)\s*(?:in(?:ch(?:es)?)?|[\"”])?\s*[x×*]\s*(\d+(?:\.\d+)?)",
+		text,
+		re.I,
+	)
+	if m:
+		return {
+			"width_in": flt(m.group(1)) or 4,
+			"height_in": flt(m.group(2)) or 4,
+			"raw": text or "4x4",
+		}
+	return {"width_in": 4.0, "height_in": 4.0, "raw": text or "4x4"}
+
+
+def _label_template_check_value(doc, meta, fieldnames, labels):
+	"""Return 0/1 if a Check field matches, else None."""
+	wanted_fn = {str(x).strip().lower() for x in (fieldnames or []) if x}
+	wanted_lb = {str(x).strip().lower() for x in (labels or []) if x}
+	for df in meta.fields or []:
+		if _cstr(getattr(df, "fieldtype", "")).lower() != "check":
+			continue
+		fn = _cstr(getattr(df, "fieldname", "")).lower()
+		fn_bare = fn[7:] if fn.startswith("custom_") else fn
+		lb = _cstr(getattr(df, "label", "")).lower()
+		if fn in wanted_fn or fn_bare in wanted_fn or lb in wanted_lb:
+			return 1 if cint(doc.get(df.fieldname)) else 0
+	return None
+
+
+def build_label_template_print_spec(name=None) -> dict | None:
+	"""Normalize Label Template checkboxes + size for sticker print."""
+	key = normalize_label_template_link(name)
+	if not key or not frappe.db.exists("DocType", "Label Template"):
+		return None
+	if not frappe.db.exists("Label Template", key):
+		return None
+	# db.get_value skips DocPerm — GSM operators often cannot open Label Template.
+	doc = frappe.db.get_value("Label Template", key, "*", as_dict=True)
+	if not doc:
+		return None
+	meta = frappe.get_meta("Label Template")
+	size_raw = ""
+	for fn in _LABEL_TEMPLATE_SIZE_FIELDS:
+		if meta.has_field(fn):
+			size_raw = _cstr(doc.get(fn))
+			if size_raw:
+				break
+	if not size_raw:
+		for df in meta.fields or []:
+			lb = _cstr(getattr(df, "label", "")).lower()
+			if "size" in lb or "dimension" in lb:
+				size_raw = _cstr(doc.get(df.fieldname))
+				if size_raw:
+					break
+	size = _label_template_parse_size(size_raw)
+	compact = flt(size["height_in"]) <= 2.5
+	fields = {
+		"show_company": 0 if compact else 1,
+		"show_email": 0 if compact else 1,
+		"show_customer": 0,
+		"show_quality": 0 if compact else 1,
+		"show_order_code": 0 if compact else 1,
+		"show_gsm": 1,
+		"show_color": 1,
+		"show_length": 1,
+		"show_width": 1,
+		"show_gw": 0 if compact else 1,
+		"show_nw": 1,
+		"show_batch": 1,
+		"show_barcode": 1,
+		"width_in": size["width_in"],
+		"height_in": size["height_in"],
+	}
+	for flag, fieldnames, labels in _LABEL_TEMPLATE_FLAG_MAP:
+		hit = _label_template_check_value(doc, meta, fieldnames, labels)
+		if hit is not None:
+			fields[flag] = hit
+	display = key
+	for fn in ("label_name", "template_name", "label"):
+		if meta.has_field(fn):
+			disp = _cstr(doc.get(fn))
+			if disp:
+				display = disp
+				break
+	return {
+		"name": key,
+		"display_name": display,
+		"from_template": 1,
+		"size_raw": size["raw"],
+		"width_in": size["width_in"],
+		"height_in": size["height_in"],
+		"fields": fields,
+	}
+
+
+@frappe.whitelist(methods=["GET", "POST"])
+def get_label_template_print_spec(name=None):
+	"""GSM / SPR operators may lack Label Template DocPerm — ignore permissions."""
+	if not frappe.session.user or frappe.session.user == "Guest":
+		frappe.throw(_("Please log in to continue."), frappe.AuthenticationError)
+	try:
+		return build_label_template_print_spec(name) or {}
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "get_label_template_print_spec")
+		return {}
+
+
 def resolve_label_from_pp_doc(pp_doc) -> str:
 	"""Label / label type from Production Plan header or first shaft detail row (sites use different field names)."""
 	if not pp_doc:

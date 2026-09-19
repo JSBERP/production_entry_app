@@ -28,10 +28,53 @@ function is_scandinavian_skip_custom_dialog(row, frm) {
     );
 }
 
+var _label_template_spec_cache = {};
+
+function resolve_label_template_spec(raw_label, doc, callback) {
+    if (doc && doc._label_template && doc._label_template.from_template) {
+        callback(doc._label_template);
+        return;
+    }
+    var key = String(raw_label || "").trim();
+    if (!key) {
+        callback(null);
+        return;
+    }
+    if (_label_template_spec_cache[key]) {
+        callback(_label_template_spec_cache[key]);
+        return;
+    }
+    frappe.call({
+        method: "production_entry.production_planning.doctype.shaft_production_run.shaft_production_run.get_label_template_print_spec",
+        args: { name: key },
+        callback: function (r) {
+            var spec = r && r.message && r.message.from_template ? r.message : null;
+            if (spec) {
+                _label_template_spec_cache[key] = spec;
+                if (doc) {
+                    doc._label_template = spec;
+                }
+            }
+            callback(spec);
+        },
+        error: function () {
+            callback(null);
+        }
+    });
+}
+
 function trigger_print_with_details(row_name, item_name, frm) {
     var doc = frm.doc;
-    var raw_label = doc.custom_label || "Default";
-    var label_type = raw_label.trim().toLowerCase();
+    var raw_label = (doc && doc.custom_label) || "Default";
+    resolve_label_template_spec(raw_label, doc, function (spec) {
+        continue_print_with_details(row_name, item_name, frm, spec);
+    });
+}
+
+function continue_print_with_details(row_name, item_name, frm, spec) {
+    var doc = frm.doc;
+    var raw_label = ((spec && spec.name) || (doc && doc.custom_label) || "Default");
+    var label_type = String(raw_label).trim().toLowerCase();
     var row = (locals['Shaft Production Run Item'] || {})[row_name] || (doc.items || []).find(function (r) { return r.name === row_name; }) || (doc.roll_wise_entry || []).find(function (r) { return r.name === row_name; });
     if (!row) return;
 
@@ -39,10 +82,12 @@ function trigger_print_with_details(row_name, item_name, frm) {
     var final_gsm = row.gsm || details.gsm || "";
     var final_color = row.color || details.color || "";
     var final_quality = row.quality || details.quality || "";
+    var template_fields = spec && spec.fields ? spec.fields : null;
+    var is_template = !!(spec && spec.from_template);
 
     if (label_type.includes("reliance") || label_type.includes("relience")) {
         flow_reliance_cm(row_name, final_gsm, final_color, final_quality, frm);
-    } else if (label_type.includes("custom")) {
+    } else if (!is_template && label_type.includes("custom")) {
         var w_custom = row.width_inch || details.width_inch || "0";
         if (is_scandinavian_skip_custom_dialog(row, frm)) {
             frappe.run_print_logic(row_name, w_custom + " Inches", final_gsm, final_color, final_quality, frm);
@@ -51,7 +96,7 @@ function trigger_print_with_details(row_name, item_name, frm) {
         }
     } else {
         var w = row.width_inch || details.width_inch || "0";
-        frappe.run_print_logic(row_name, w + " Inches", final_gsm, final_color, final_quality, frm);
+        frappe.run_print_logic(row_name, w + " Inches", final_gsm, final_color, final_quality, frm, template_fields);
     }
 }
 
@@ -579,9 +624,12 @@ function get_grid_format(d, type, custom_fields) {
 
     var fields = custom_fields || {
         show_company: 1, show_email: 1, show_customer: 1, show_quality: 1, show_order_code: 1,
-        show_gsm: 1, show_width: 1, show_length: 1, show_gw: 1, show_nw: 1,
-        show_batch: 1, show_barcode: 1
+        show_gsm: 1, show_color: 1, show_width: 1, show_length: 1, show_gw: 1, show_nw: 1,
+        show_batch: 1, show_barcode: 1, width_in: 4, height_in: 4
     };
+    var labelW = flt(fields.width_in) || 4;
+    var labelH = flt(fields.height_in) || 4;
+    var is4x2 = labelH <= 2.5;
 
     var qualityText = fields.show_quality ? String(d.quality || "").trim() : "";
     var orderCodeText = fields.show_order_code ? String(d.party_code || "").trim() : "";
@@ -610,7 +658,7 @@ function get_grid_format(d, type, custom_fields) {
     if (fields.show_gsm) {
         rows.push('<tr><td><span class="lbl">GSM</span></td><td class="colon">:</td><td><span class="val">' + d.gsm + '</span></td></tr>');
     }
-    if (d.color && (isPlain || isPlainCC || isDefault)) {
+    if (d.color && fields.show_color) {
         rows.push('<tr><td><span class="lbl">COLOR</span></td><td class="colon">:</td><td><span class="val">' + escape_html(d.color) + '</span></td></tr>');
     }
 
@@ -643,7 +691,7 @@ function get_grid_format(d, type, custom_fields) {
     }
 
     var rowCount = rows.length;
-    var isCompact = !isCustom && rowCount > 5;
+    var isCompact = is4x2 || (!isCustom && rowCount > 5);
     var hasCustomerHeader = !!customer_header_row;
     var hasHeaderContent = !!(header || sub1 || sub2 || customer_header_row);
     var hasBatch = !!(fields.show_batch && d.batch_no);
@@ -720,11 +768,38 @@ function get_grid_format(d, type, custom_fields) {
         tableHeight = '100%';
     }
 
+    var pageSize = labelW + 'in ' + labelH + 'in';
+    var stickerBox = 'width: ' + labelW + 'in; height: ' + labelH + 'in;';
+    if (is4x2) {
+        labelStyle = 'font-size: 0.82em;';
+        headerSize = 'font-size: 16px;';
+        emailSize = '9px';
+        subheaderSize = '12px';
+        headerPadBot = '2px';
+        headerMarginBot = '2px';
+        innerMargin = '4px';
+        innerPad = '3px 6px';
+        tdPad = '1px 0';
+        colonSize = '12px';
+        lblSize = '12px';
+        valSize = '12px';
+        btmPadTop = '2px';
+        btmMargin = '1px 0';
+        batchLblSize = '11px';
+        batchValSize = '12px';
+        barcodeContPad = '1px 0 0 0';
+        barcodeH = '28px';
+        barcodeFontSize = 9;
+        barcodeWidth = 1.4;
+        tableMarginY = '0px';
+        tableJustify = 'center';
+        tableHeight = '100%';
+    }
     return '<html><head><title>Label Preview</title><style>' +
-        '@media print { .btn-panel { display: none !important; } @page { size: 4in 4in; margin: 0; } body { margin: 0; } }' +
+        '@media print { .btn-panel { display: none !important; } @page { size: ' + pageSize + '; margin: 0; } body { margin: 0; } }' +
         'body { font-family: "Arial", sans-serif; margin: 0; padding: 0; text-align: center; background: #eee; ' + labelStyle + ' }' +
         '.btn-panel { padding: 10px; background: #eee; }' +
-        '.sticker { width: 4in; height: 4in; margin: 20px auto; border: 2px solid black; background: white; box-sizing: border-box; display: flex; flex-direction: column; overflow: hidden; }' +
+        '.sticker { ' + stickerBox + ' margin: 20px auto; border: 2px solid black; background: white; box-sizing: border-box; display: flex; flex-direction: column; overflow: hidden; }' +
         '.inner-border { border: 2px solid black; margin: ' + innerMargin + '; padding: ' + innerPad + '; flex-grow: 1; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; }' +
         '.header { text-align: center; display: ' + headerDisplay + '; border-bottom: ' + headerBorderStyle + '; padding-bottom: ' + headerPadBot + '; margin-bottom: ' + headerMarginBot + '; }' +
         '.company { ' + headerSize + ' font-weight: 900; letter-spacing: 0.5px; margin-bottom: 1px; }' +
@@ -837,8 +912,8 @@ function escape_html(s) {
 function normalize_custom_fields(custom_fields) {
     var defaults = {
         show_company: 1, show_email: 1, show_customer: 1, show_quality: 1, show_order_code: 1,
-        show_gsm: 1, show_width: 1, show_length: 1, show_gw: 1, show_nw: 1,
-        show_batch: 1, show_barcode: 1
+        show_gsm: 1, show_color: 1, show_width: 1, show_length: 1, show_gw: 1, show_nw: 1,
+        show_batch: 1, show_barcode: 1, width_in: 4, height_in: 4
     };
     if (!custom_fields) return defaults;
 
@@ -857,12 +932,15 @@ function normalize_custom_fields(custom_fields) {
         show_quality: as_bool(custom_fields.show_quality, 1),
         show_order_code: as_bool(custom_fields.show_order_code, 1),
         show_gsm: as_bool(custom_fields.show_gsm, 1),
+        show_color: as_bool(custom_fields.show_color, 1),
         show_width: as_bool(custom_fields.show_width, 1),
         show_length: as_bool(custom_fields.show_length, 1),
         show_gw: as_bool(custom_fields.show_gw, 1),
         show_nw: as_bool(custom_fields.show_nw, 1),
         show_batch: as_bool(custom_fields.show_batch, 1),
-        show_barcode: as_bool(custom_fields.show_barcode, 1)
+        show_barcode: as_bool(custom_fields.show_barcode, 1),
+        width_in: flt(custom_fields.width_in) || 4,
+        height_in: flt(custom_fields.height_in) || 4
     };
 }
 
