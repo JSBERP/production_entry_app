@@ -1,0 +1,21 @@
+﻿{
+    "idx":  0,
+    "content":  null,
+    "icon":  "edit",
+    "restrict_to_domain":  null,
+    "creation":  "2026-09-22 10:00:00.000000",
+    "doctype":  "Page",
+    "system_page":  0,
+    "modified":  "2026-09-22 10:00:00.000000",
+    "standard":  "Yes",
+    "docstatus":  0,
+    "page_name":  "lamination-production-entry",
+    "roles":  [
+
+              ],
+    "owner":  "Administrator",
+    "title":  "Lamination Production Entry",
+    "modified_by":  "Administrator",
+    "name":  "lamination-production-entry",
+    "module":  "Production Planning"
+}

@@ -35,6 +35,13 @@ BOARD_SLUGS = (
 	"confirm-orders",
 	"planning",
 	"gsm-production-entry",
+	"lamination-production-entry",
+	"slitting-production-entry",
+	"rewinding-production-entry",
+	"sheet-cutting-production-entry",
+	"bopp-printing-production-entry",
+	"flexo-printing-production-entry",
+	"bag-making-production-entry",
 	"logistics-kanban",
 	"transfer-approval-dashboard",
 	"despatch-approval-dashboard",
@@ -57,6 +64,13 @@ BOARD_PICKER_SLUGS = (
 	"confirm-orders",
 	"planning",
 	"gsm-production-entry",
+	"lamination-production-entry",
+	"slitting-production-entry",
+	"rewinding-production-entry",
+	"sheet-cutting-production-entry",
+	"bopp-printing-production-entry",
+	"flexo-printing-production-entry",
+	"bag-making-production-entry",
 	"logistics-kanban",
 	"transfer-approval-dashboard",
 	"despatch-approval-dashboard",
@@ -78,6 +92,13 @@ BOARD_PICKER_LABELS = {
 	"confirm-orders": "Confirm Orders",
 	"planning": "Planning",
 	"gsm-production-entry": "GSM Production Entry",
+	"lamination-production-entry": "Lamination Production Entry",
+	"slitting-production-entry": "Slitting Production Entry",
+	"rewinding-production-entry": "Rewinding Production Entry",
+	"sheet-cutting-production-entry": "Sheet Cutting Production Entry",
+	"bopp-printing-production-entry": "BOPP Printing Production Entry",
+	"flexo-printing-production-entry": "Flexo Printing Production Entry",
+	"bag-making-production-entry": "Bag Making Production Entry",
 	"logistics-kanban": "Logistics Kanban",
 	"transfer-approval-dashboard": "Transfer Approval",
 	"despatch-approval-dashboard": "Despatch Approval",
@@ -110,6 +131,9 @@ _BOARD_SLUG_ALIASES = {
 	"box-bag-order-table": ("box-bag-board",),
 	"w-cut-d-cut-board": ("w-cut-d-cut-order-table",),
 	"w-cut-d-cut-order-table": ("w-cut-d-cut-board",),
+	# Legacy Production Scheduler page name ↔ Confirm Orders
+	"confirm-orders": ("confirmed-order",),
+	"confirmed-order": ("confirm-orders",),
 }
 
 
@@ -456,7 +480,12 @@ def _frozen_actions_for_board(access_name: str, board_slug: str) -> dict:
 				"cc_approval_dashboard": bool(cint(getattr(row, "freeze_cc_approval_dashboard", 0))),
 			})
 
-		if slug == "gsm-production-entry" or "gsm-production-entry" in requested:
+		if (
+			slug == "gsm-production-entry"
+			or "gsm-production-entry" in requested
+			or slug.endswith("-production-entry")
+			or any(s.endswith("-production-entry") for s in requested)
+		):
 			result.update({
 				"gsm_unit": bool(cint(getattr(row, "freeze_gsm_unit", 0))),
 				"gsm_date": bool(cint(getattr(row, "freeze_gsm_date", 0))),
@@ -790,13 +819,16 @@ def assert_board_allowed(board_slug: str, user: str | None = None) -> None:
 		frappe.throw(_("Not permitted"), frappe.PermissionError)
 
 
-def assert_unit_allowed(unit: str, user: str | None = None, scope: dict | None = None) -> None:
+def is_unit_allowed(unit: str, user: str | None = None, scope: dict | None = None) -> bool:
+	"""Return True/False for unit ACL without throwing (safe inside filter loops)."""
 	scope = scope or get_user_board_scope(user)
 	if scope.get("unlimited"):
-		return
+		return True
+	if not _unit_requires_access_check(unit):
+		return True
 	allowed = scope.get("allowed_units") or []
 	if not allowed:
-		frappe.throw(_("Not permitted"), frappe.PermissionError)
+		return False
 	allowed_expanded = set()
 	for u in allowed:
 		for v in maintenance_unit_match_values(u):
@@ -804,9 +836,13 @@ def assert_unit_allowed(unit: str, user: str | None = None, scope: dict | None =
 		allowed_expanded.add(normalize_planning_unit_for_select(u) or u)
 	for v in maintenance_unit_match_values(unit):
 		if (normalize_planning_unit_for_select(v) or v) in allowed_expanded:
-			return
+			return True
 	target = normalize_planning_unit_for_select(unit)
-	if target in allowed_expanded:
+	return target in allowed_expanded
+
+
+def assert_unit_allowed(unit: str, user: str | None = None, scope: dict | None = None) -> None:
+	if is_unit_allowed(unit, user=user, scope=scope):
 		return
 	frappe.throw(_("Not permitted"), frappe.PermissionError)
 

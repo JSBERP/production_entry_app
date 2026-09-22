@@ -7,6 +7,8 @@ const TESTING_TYPES = {
 	round_gsm: "Round Cutting GSM Test",
 	patty_gsm: "Patty Cutting GSM Test",
 	tensile: "Tensile Testing",
+	colour_spectrum: "Colour Spectrum",
+	color_spectrum: "Colour Spectrum",
 };
 
 const TEMPLATE_WIDTH_FIELDS = [
@@ -392,3 +394,5 @@ production_entry.spr_quality_check.openSprPattyCuttingGsmTesting = (sprName, job
 	openSprQualityCheck(sprName, "patty_gsm", jobId);
 production_entry.spr_quality_check.openSprTensileTesting = (sprName, jobId) =>
 	openSprQualityCheck(sprName, "tensile", jobId);
+production_entry.spr_quality_check.openSprColourSpectrum = (sprName, jobId) =>
+	openSprQualityCheck(sprName, "colour_spectrum", jobId);

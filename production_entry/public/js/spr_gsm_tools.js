@@ -137,11 +137,157 @@ export async function gsmOpenRmBatches(ppId) {
 		noSprMessage();
 		return;
 	}
-	openSprForm(sprName);
-	frappe.show_alert({
-		message: __("Open SPR → Tools → Select RM batches."),
-		indicator: "blue",
+	await openGsmRollInputsDialog(sprName);
+}
+
+function escapeHtml(s) {
+	return frappe.utils.escape_html(String(s == null ? "" : s));
+}
+
+/** In-page Roll Inputs dialog (same as SPR Select RM batches) — does not open SPR form. */
+export async function openGsmRollInputsDialog(sprName) {
+	if (!sprName) {
+		noSprMessage();
+		return;
+	}
+	frappe.dom.freeze(__("Loading roll inputs..."));
+	let ctx = {};
+	try {
+		const r = await frappe.call({
+			method:
+				"production_entry.production_planning.doctype.shaft_production_run.shaft_production_run.spr_get_fabric_batch_pick_context",
+			args: { spr_name: sprName },
+		});
+		ctx = r.message || {};
+	} catch (e) {
+		frappe.dom.unfreeze();
+		frappe.msgprint(__("Could not load RM batches for this SPR."));
+		return;
+	}
+	frappe.dom.unfreeze();
+
+	if (!ctx.needs_picks) {
+		frappe.msgprint(
+			__(
+				"No RM batch selection is required for this SPR yet. Save FG roll lines / ensure WO BOM has batch-tracked materials, then try again."
+			)
+		);
+		return;
+	}
+
+	const picksByKey = {};
+	(ctx.current_picks || []).forEach((p) => {
+		const k = `${p.work_order || ""}|${p.item_code || ""}|${p.batch_no || ""}`;
+		picksByKey[k] = flt(p.qty);
 	});
+
+	let bodyHtml = '<div class="spr-batch-dlg" style="max-height:460px;overflow:auto">';
+	(ctx.lines || []).forEach((ln) => {
+		bodyHtml +=
+			`<h4 style="margin-top:0.75rem">${escapeHtml(ln.work_order || "")} — FG ${escapeHtml(ln.fg_item || "")}` +
+			(ln.fg_process ? ` (${escapeHtml(String(ln.fg_process))})` : "") +
+			` — ${__("SPR total")} ${escapeHtml(String(ln.total_fg_kg || ""))} Kg</h4>`;
+		bodyHtml +=
+			`<p class="text-muted small">${__("WIP warehouse")}: ${escapeHtml(ln.wip_warehouse || "")} — ${__(
+				"Work In Progress batches only. Tick the roll you are loading now."
+			)}</p>`;
+		(ln.raw_materials || []).forEach((rm) => {
+			const procTag = rm.process_code ? ` [${escapeHtml(String(rm.process_code))}]` : "";
+			bodyHtml += `<h5 style="margin-top:0.5rem">${escapeHtml(rm.item_code || "")}${procTag} — ${escapeHtml(
+				rm.item_name || ""
+			)}</h5>`;
+			bodyHtml +=
+				`<p class="small">${__("Required")}: <b>${String(flt(rm.required_qty))}</b> Kg</p>` +
+				`<table class="table table-bordered table-condensed"><thead><tr>` +
+				`<th style="width:2rem">${__("Use")}</th><th>${__("Batch No")}</th><th>${__("Warehouse")}</th>` +
+				`<th>${__("Avail (Kg)")}</th><th>${__("Use (Kg)")}</th></tr></thead><tbody>`;
+			const batches = (rm.batches || []).filter((b) => {
+				const bwh = String(b.warehouse || "");
+				const wip = String(ln.wip_warehouse || "");
+				if (wip && bwh === wip) return true;
+				return /work\s*in\s*progress/i.test(bwh) || /^wip\b/i.test(bwh);
+			});
+			batches.forEach((b) => {
+				const bn = String(b.batch_no || "");
+				const key = `${ln.work_order || ""}|${rm.item_code || ""}|${bn}`;
+				const defq = picksByKey[key] != null ? picksByKey[key] : "";
+				const mx = Math.round(flt(b.qty) * 1000) / 1000;
+				const hasPick = defq !== "" && flt(defq) > 0;
+				bodyHtml +=
+					`<tr data-wo="${escapeHtml(ln.work_order || "")}" data-item="${escapeHtml(rm.item_code || "")}" data-batch="${escapeHtml(bn)}">` +
+					`<td><input type="checkbox" class="spr-bch-use"${hasPick ? " checked" : ""} /></td>` +
+					`<td>${escapeHtml(bn)}</td><td>${escapeHtml(b.warehouse || "")}</td><td>${String(mx)}</td>` +
+					`<td><input type="number" class="input-with-feedback form-control spr-bch-qty" step="0.001" min="0" data-max="${String(
+						mx
+					)}" value="${hasPick ? String(Math.round(flt(defq) * 1000) / 1000) : ""}" style="max-width:9rem" /></td></tr>`;
+			});
+			if (!batches.length) {
+				bodyHtml += `<tr><td colspan="5">${__(
+					"No batches transferred for this WO yet. Submit Material Transfer for Manufacture first."
+				)}</td></tr>`;
+			}
+			bodyHtml += "</tbody></table>";
+		});
+	});
+	bodyHtml += "</div>";
+
+	const d = new frappe.ui.Dialog({
+		title: __("Roll Inputs — Select RM batches"),
+		fields: [{ fieldtype: "HTML", fieldname: "spr_batch_html" }],
+		size: "extra-large",
+		primary_action_label: __("Save picks"),
+		primary_action() {
+			const out = [];
+			let qtyErr = "";
+			d.$wrapper.find("tr[data-batch]").each(function () {
+				const $tr = $(this);
+				if (!$tr.find(".spr-bch-use").prop("checked")) return;
+				const q = Math.round(flt($tr.find(".spr-bch-qty").val()) * 1000) / 1000;
+				const mx = Math.round(flt($tr.find(".spr-bch-qty").attr("data-max")) * 1000) / 1000;
+				if (q <= 0) return;
+				let useQty = q;
+				if (mx > 0 && useQty > mx) {
+					if (useQty - mx <= 0.02) useQty = mx;
+					else {
+						qtyErr = __("Use quantity cannot exceed available stock for one of the selected batches.");
+						return false;
+					}
+				}
+				out.push({
+					work_order: $tr.attr("data-wo"),
+					item_code: $tr.attr("data-item"),
+					batch_no: $tr.attr("data-batch"),
+					qty: useQty,
+				});
+			});
+			if (qtyErr) {
+				frappe.msgprint(qtyErr);
+				return;
+			}
+			frappe.call({
+				method:
+					"production_entry.production_planning.doctype.shaft_production_run.shaft_production_run.spr_save_fabric_batch_picks",
+				args: { spr_name: sprName, picks_json: JSON.stringify(out) },
+				freeze: true,
+				freeze_message: __("Saving..."),
+				callback(r) {
+					if (r.exc) {
+						frappe.msgprint({ title: __("Save failed"), indicator: "red", message: r.exc });
+						return;
+					}
+					d.hide();
+					frappe.show_alert({
+						message: __("Roll Inputs saved ({0} line(s)).", [
+							(r.message && r.message.count) || out.length,
+						]),
+						indicator: "green",
+					});
+				},
+			});
+		},
+	});
+	d.fields_dict.spr_batch_html.$wrapper.html(bodyHtml);
+	d.show();
 }
 
 /** Print production label — delegates to shared desk SPR label flow. */
@@ -286,6 +432,13 @@ export async function gsmOpenQualityCheck({ sprName, ppId, kind, jobId, session 
 			await qc.openSprTensileTesting(name, jobId);
 			return;
 		}
+		if (
+			(k === "colour_spectrum" || k === "color_spectrum") &&
+			typeof qc.openSprColourSpectrum === "function"
+		) {
+			await qc.openSprColourSpectrum(name, jobId);
+			return;
+		}
 		if (typeof qc.openSprRoundCuttingGsmTesting === "function") {
 			await qc.openSprRoundCuttingGsmTesting(name, jobId);
 			return;
@@ -319,6 +472,11 @@ export async function gsmOpenPattyCuttingGsmTesting(ppId, jobId, session) {
 /** Start Tensile Testing — same redirect as desk SPR Quality Check. */
 export async function gsmOpenTensileTesting(ppId, jobId, session) {
 	return gsmOpenQualityCheck({ ppId, kind: "tensile", jobId, session });
+}
+
+/** Start Colour Spectrum — opens Quality Checking with testing_type Colour Spectrum. */
+export async function gsmOpenColourSpectrum(ppId, jobId, session) {
+	return gsmOpenQualityCheck({ ppId, kind: "colour_spectrum", jobId, session });
 }
 
 /** Fix No. of Shaft = 0 on draft SPR roll lines. */

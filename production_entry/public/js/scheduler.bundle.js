@@ -154,6 +154,78 @@ production_scheduler.GsmProductionEntryController = class {
     }
 };
 
+function mountProcessProductionEntry(wrapper, label, opts) {
+    safeMount(GsmProductionEntry, wrapper, label, {
+        boardSlug: opts.boardSlug,
+        processScope: opts.processScope,
+        pageTitle: opts.pageTitle || label,
+        showRollInputs: true,
+    });
+}
+
+production_scheduler.LaminationProductionEntryController = class {
+    constructor(wrapper) {
+        mountProcessProductionEntry(wrapper, "Lamination Production Entry", {
+            boardSlug: "lamination-production-entry",
+            processScope: "lamination_only",
+        });
+    }
+};
+
+production_scheduler.SlittingProductionEntryController = class {
+    constructor(wrapper) {
+        mountProcessProductionEntry(wrapper, "Slitting Production Entry", {
+            boardSlug: "slitting-production-entry",
+            processScope: "slitting_only",
+        });
+    }
+};
+
+production_scheduler.RewindingProductionEntryController = class {
+    constructor(wrapper) {
+        mountProcessProductionEntry(wrapper, "Rewinding Production Entry", {
+            boardSlug: "rewinding-production-entry",
+            processScope: "rewinding_only",
+        });
+    }
+};
+
+production_scheduler.SheetCuttingProductionEntryController = class {
+    constructor(wrapper) {
+        mountProcessProductionEntry(wrapper, "Sheet Cutting Production Entry", {
+            boardSlug: "sheet-cutting-production-entry",
+            processScope: "sheet_cutting_only",
+        });
+    }
+};
+
+production_scheduler.BoppPrintingProductionEntryController = class {
+    constructor(wrapper) {
+        mountProcessProductionEntry(wrapper, "BOPP Printing Production Entry", {
+            boardSlug: "bopp-printing-production-entry",
+            processScope: "printed_bopp_pb_only",
+        });
+    }
+};
+
+production_scheduler.FlexoPrintingProductionEntryController = class {
+    constructor(wrapper) {
+        mountProcessProductionEntry(wrapper, "Flexo Printing Production Entry", {
+            boardSlug: "flexo-printing-production-entry",
+            processScope: "printing_only",
+        });
+    }
+};
+
+production_scheduler.BagMakingProductionEntryController = class {
+    constructor(wrapper) {
+        mountProcessProductionEntry(wrapper, "Bag Making Production Entry", {
+            boardSlug: "bag-making-production-entry",
+            processScope: "box_bag_only",
+        });
+    }
+};
+
 let _sprTransferDialogMount = null;
 
 production_scheduler.openSprTransferDialog = function (sprName) {

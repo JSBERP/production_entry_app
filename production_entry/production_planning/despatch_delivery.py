@@ -64,9 +64,14 @@ def _resolve_against_sales_order(ln, despatch_customer):
 	return ""
 
 
-def _apply_dn_addresses(dn, customer, sales_order=None):
-	"""Prefill billing/shipping from linked SO, else Customer defaults."""
-	ship = bill = ""
+def _apply_dn_addresses(dn, customer, sales_order=None, preferred_shipping=None):
+	"""Prefill billing/shipping from linked SO, else Customer defaults.
+
+	preferred_shipping: Clubbing Sheet Item shipping address overrides SO/Customer shipping only.
+	Billing always follows SO customer_address / Customer primary.
+	"""
+	ship = _cstr(preferred_shipping)
+	bill = ""
 	if sales_order and frappe.db.exists("Sales Order", sales_order):
 		row = frappe.db.get_value(
 			"Sales Order",
@@ -75,7 +80,8 @@ def _apply_dn_addresses(dn, customer, sales_order=None):
 			as_dict=True,
 		)
 		if row:
-			ship = _cstr(row.shipping_address_name)
+			if not ship:
+				ship = _cstr(row.shipping_address_name)
 			bill = _cstr(row.customer_address)
 
 	if not ship or not bill:
@@ -114,6 +120,51 @@ def _apply_dn_addresses(dn, customer, sales_order=None):
 		dn.shipping_address_name = ship
 	if bill and hasattr(dn, "customer_address"):
 		dn.customer_address = bill
+
+
+def _clubbing_shipping_address_for_dn(despatch_approval, customer, party_code=None, sales_order=None):
+	"""Resolve Clubbing Sheet Item.custom_shipping_address for this DN group."""
+	club = _cstr(getattr(despatch_approval, "custom_clubbing_sheet", None) or "")
+	if not club or not frappe.db.exists("Clubbing Sheet", club):
+		return ""
+	if not frappe.db.has_column("Clubbing Sheet Item", "custom_shipping_address"):
+		return ""
+
+	pc = _cstr(party_code)
+	so = _cstr(sales_order)
+	cust = _cstr(customer)
+
+	# Prefer exact party_code match, then sales_order, then customer
+	candidates = frappe.get_all(
+		"Clubbing Sheet Item",
+		filters={"parent": club},
+		fields=["custom_shipping_address", "party_code", "sales_order", "customer", "order_code"],
+		order_by="idx asc",
+	) or []
+	if not candidates:
+		return ""
+
+	def _pick(pred):
+		for row in candidates:
+			if pred(row) and _cstr(row.get("custom_shipping_address")):
+				return _cstr(row.get("custom_shipping_address"))
+		return ""
+
+	if pc:
+		found = _pick(
+			lambda r: _cstr(r.get("party_code")) == pc or _cstr(r.get("order_code")) == pc
+		)
+		if found:
+			return found
+	if so:
+		found = _pick(lambda r: _cstr(r.get("sales_order")) == so)
+		if found:
+			return found
+	if cust:
+		found = _pick(lambda r: _cstr(r.get("customer")) == cust)
+		if found:
+			return found
+	return ""
 
 
 def cint_safe(v):
@@ -558,7 +609,10 @@ def build_delivery_note_from_despatch(despatch_approval, party_code=None, despat
 	dn.set_posting_time = 1
 	dn.posting_date = getdate()
 	dn.set_warehouse = wh
-	_apply_dn_addresses(dn, customer, against_so)
+	preferred_ship = _clubbing_shipping_address_for_dn(
+		da, customer, party_code=pc_filter if use_pc else None, sales_order=against_so
+	)
+	_apply_dn_addresses(dn, customer, against_so, preferred_shipping=preferred_ship)
 	_apply_clubbing_transporter_to_dn(dn, da)
 	if _doc_has_field("Delivery Note", "custom_despatch_approval"):
 		dn.custom_despatch_approval = da.name

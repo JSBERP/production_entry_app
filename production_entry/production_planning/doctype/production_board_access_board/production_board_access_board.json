@@ -73,7 +73,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Board (Page ID)",
-   "options": "production-board|Production Board (Kanban)\nprinting-order-board|Printing Order Board\nlamination-board|Lamination Board\nslitting-board|Slitting Board\nslitting-order-table|Slitting Order Table\nrewinding-board|Rewinding Board\nsheet-cutting-board|Sheet Cutting Board\nprinted-bopp-film-board|Printed BOPP Film Board\nbox-bag-board|Box Bag Board\nw-cut-d-cut-board|W-Cut / D-Cut Board\ncolor-chart|Color Chart\nconfirm-orders|Confirm Orders\nplanning|Planning\ngsm-production-entry|GSM Production Entry\nlogistics-kanban|Logistics Kanban\ntransfer-approval-dashboard|Transfer Approval\ndespatch-approval-dashboard|Despatch Approval\nproduction-learning|Production Learning",
+   "options": "production-board|Production Board (Kanban)\nprinting-order-board|Printing Order Board\nlamination-board|Lamination Board\nslitting-board|Slitting Board\nslitting-order-table|Slitting Order Table\nrewinding-board|Rewinding Board\nsheet-cutting-board|Sheet Cutting Board\nprinted-bopp-film-board|Printed BOPP Film Board\nbox-bag-board|Box Bag Board\nw-cut-d-cut-board|W-Cut / D-Cut Board\ncolor-chart|Color Chart\nconfirm-orders|Confirm Orders\nplanning|Planning\ngsm-production-entry|GSM Production Entry\nlamination-production-entry|Lamination Production Entry\nslitting-production-entry|Slitting Production Entry\nrewinding-production-entry|Rewinding Production Entry\nsheet-cutting-production-entry|Sheet Cutting Production Entry\nbopp-printing-production-entry|BOPP Printing Production Entry\nflexo-printing-production-entry|Flexo Printing Production Entry\nbag-making-production-entry|Bag Making Production Entry\nlogistics-kanban|Logistics Kanban\ntransfer-approval-dashboard|Transfer Approval\ndespatch-approval-dashboard|Despatch Approval\nproduction-learning|Production Learning",
    "reqd": 1
   },
   {
@@ -266,7 +266,7 @@
    "label": "Approval Dashboard - CC"
   },
   {
-   "depends_on": "eval:((doc.board || '').split('|')[0].trim().toLowerCase().replace(/\\s+/g, '-').replace(/_/g, '-')) === 'gsm-production-entry'",
+   "depends_on": "eval:['gsm-production-entry','lamination-production-entry','slitting-production-entry','rewinding-production-entry','sheet-cutting-production-entry','bopp-printing-production-entry','flexo-printing-production-entry','bag-making-production-entry'].includes(((doc.board || '').split('|')[0].trim().toLowerCase().replace(/\\s+/g, '-').replace(/_/g, '-')))",
    "fieldname": "section_freeze_gsm",
    "fieldtype": "Section Break",
    "label": "GSM Production Entry — Freeze (- GSM)"

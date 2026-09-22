@@ -146,10 +146,12 @@ def get_planning_orders_for_clubbing(party_code=None, planned_date=None, custome
 
 	so_names = list({_cstr(r.sales_order) for r in rows if r.sales_order})
 	city_by_so = {}
+	ship_by_so = {}
 	if so_names:
 		addrs = frappe.db.sql(
 			"""
-			select so.name as so_name, ifnull(addr.city, '') as city
+			select so.name as so_name, ifnull(addr.city, '') as city,
+			       ifnull(so.shipping_address_name, '') as shipping_address_name
 			from `tabSales Order` so
 			left join `tabAddress` addr on addr.name = so.shipping_address_name
 			where so.name in %(names)s
@@ -159,6 +161,7 @@ def get_planning_orders_for_clubbing(party_code=None, planned_date=None, custome
 		)
 		for a in addrs or []:
 			city_by_so[_cstr(a.so_name)] = _cstr(a.city)
+			ship_by_so[_cstr(a.so_name)] = _cstr(a.shipping_address_name)
 
 	out = []
 	for r in rows:
@@ -225,6 +228,7 @@ def get_planning_orders_for_clubbing(party_code=None, planned_date=None, custome
 				"customer_name": _cstr(r.customer_name or r.customer),
 				"sales_order": so,
 				"city": row_city,
+				"shipping_address_name": ship_by_so.get(so, ""),
 				"custom_party_code": party,
 				"item_code": _cstr(r.item_code),
 				"quality": _cstr(r.get("quality")),

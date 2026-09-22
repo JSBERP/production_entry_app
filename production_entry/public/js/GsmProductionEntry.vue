@@ -17,7 +17,7 @@
       </div>
     </div>
     <div class="gpe-info-strip">
-      Create SPRs for selected orders, enter rolls, Save Row saves to server. Submit Entry pushes to SPR and submits.
+      {{ pageHeading }} — Create SPRs for selected orders, enter rolls, Save Row saves to server. Submit Entry pushes to SPR and submits.
     </div>
 
     <div class="gpe-page-tabs">
@@ -401,6 +401,7 @@
                       <button type="button" @click.stop="runQualityCheck('round_gsm')">Round Cutting GSM Test</button>
                       <button type="button" @click.stop="runQualityCheck('patty_gsm')">Patty Cutting GSM Test</button>
                       <button type="button" @click.stop="runQualityCheck('tensile')">Tensile Testing</button>
+                      <button type="button" @click.stop="runQualityCheck('colour_spectrum')">Colour Spectrum</button>
                     </div>
                   </div>
                   <button
@@ -506,6 +507,15 @@
           </div>
           <span class="gpe-save-status">{{ saveStatus }}</span>
           <div class="gpe-toolbar-right">
+            <button
+              v-if="showRollInputsBtn"
+              type="button"
+              class="gpe-btn"
+              :disabled="!toolsEnabled"
+              :title="toolsHint || 'Select RM batches for WO consumption'"
+              :style="boardActionFrozenStyle(gsmBoardAccess, 'gsm_tools')"
+              @click="runTool('rmbatches')"
+            >Roll Inputs</button>
             <div class="gpe-tools-wrap" v-click-outside="closeToolsMenu">
               <button
                 type="button"
@@ -520,7 +530,7 @@
                 <button type="button" @click="runTool('trail')">SPR — Trail Order</button>
                 <button type="button" @click="runTool('bundle')">SPR — Bundle packaging</button>
                 <button type="button" @click="runTool('bundlese')">SPR — Bundle SE on Submit</button>
-                <button type="button" @click="runTool('rmbatches')">SPR — Select RM batches</button>
+                <button type="button" @click="runTool('rmbatches')">{{ showRollInputsBtn ? "Roll Inputs / Select RM batches" : "SPR — Select RM batches" }}</button>
                 <button v-if="isLaminationMode" type="button" @click="runTool('lamFabricIn')">Lamination — Add Fabric Inputs</button>
                 <button v-if="isLaminationMode" type="button" @click="runTool('lamBoppIn')">Lamination — Add BOPP Inputs</button>
                 <button v-if="isLaminationMode" type="button" @click="runTool('lamOutput')">Lamination — Add Output Rolls</button>
@@ -1976,12 +1986,23 @@ import {
   boardActionFrozenStyle,
 } from "./board_access_ui.js";
 
-const STORAGE_KEY = `gsm_production_entry_draft_v3_${frappe.session.user || "guest"}`;
-const BOARD_SLUG = "gsm-production-entry";
-const GSM_BOARD_SLUG = "gsm-production-entry";
+const props = defineProps({
+  boardSlug: { type: String, default: "gsm-production-entry" },
+  processScope: { type: String, default: "" },
+  pageTitle: { type: String, default: "GSM Production Entry" },
+  showRollInputs: { type: Boolean, default: false },
+});
+
+const BOARD_SLUG = computed(() => String(props.boardSlug || "gsm-production-entry").trim() || "gsm-production-entry");
+const GSM_BOARD_SLUG = BOARD_SLUG;
+const STORAGE_KEY = computed(
+  () => `gsm_production_entry_draft_v3_${BOARD_SLUG.value}_${frappe.session.user || "guest"}`
+);
 const FABRIC_UNITS = ["Unit 1", "Unit 2", "Unit 3", "Unit 4"];
 const LAMINATION_UNIT = "TNSPL - LAMINATION UNIT";
 const GSM_ENTRY_UNITS = [...FABRIC_UNITS, LAMINATION_UNIT];
+const showRollInputsBtn = computed(() => !!props.showRollInputs);
+const pageHeading = computed(() => String(props.pageTitle || "GSM Production Entry").trim());
 
 const viewScope = ref("daily");
 const filterDate = ref(frappe.datetime.get_today());
@@ -3736,7 +3757,12 @@ const unitOptions = computed(() => {
 
 const fabricUnitOptions = computed(() => unitOptions.value.filter((u) => isFabricUnit(u)));
 
-const isLaminationMode = computed(() => isLaminationUnit(headerUnit.value || filterUnit.value));
+const isLaminationMode = computed(() => {
+  const scope = String(props.processScope || "").trim();
+  if (scope === "lamination_only") return true;
+  if (scope) return false;
+  return isLaminationUnit(headerUnit.value || filterUnit.value);
+});
 
 const freezeGsmUnit = computed(() => isBoardActionFrozen(gsmBoardAccess.value, "gsm_unit"));
 const freezeGsmDate = computed(() => isBoardActionFrozen(gsmBoardAccess.value, "gsm_date"));
@@ -7123,14 +7149,15 @@ async function printQcLabel(row) {
 }
 
 function buildFetchArgs() {
-  const lam = isLaminationUnit(filterUnit.value || headerUnit.value);
+  const lam = isLaminationMode.value;
+  const scope = String(props.processScope || "").trim();
   const args = {
-    board_slug: BOARD_SLUG,
+    board_slug: BOARD_SLUG.value,
     plan_name: "__all__",
     planned_only: 1,
-    board_process_scope: lam ? "lamination_only" : "only_100",
+    board_process_scope: scope || (lam ? "lamination_only" : "only_100"),
   };
-  if (lam) {
+  if (lam || scope === "lamination_only") {
     args.lamination_process = ""; // both 104 + 107 via chart when empty — API may need one; fetch both client-side if needed
   }
   if (viewScope.value === "monthly" && filterMonth.value) {
@@ -7953,7 +7980,7 @@ function applyResumePayload(msg, options = {}) {
 
 function peekDraftFilterDate() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem("gsm_production_entry_draft_v2");
+    const raw = localStorage.getItem(STORAGE_KEY.value) || localStorage.getItem("gsm_production_entry_draft_v2");
     if (!raw) {
       return null;
     }
@@ -8270,7 +8297,7 @@ function clearGsmAfterClose() {
   forceNewSprSession.value = true;
   resetBatchSeriesCache();
   try {
-    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(STORAGE_KEY.value);
     localStorage.removeItem("gsm_production_entry_draft_v2");
   } catch (e) {
     console.warn("draft clear", e);
@@ -8459,7 +8486,7 @@ async function loadGsmBoardAccess() {
   try {
     const r = await frappe.call({
       method: "production_entry.production_planning.board_access.get_production_board_user_context",
-      args: { board_slug: GSM_BOARD_SLUG },
+      args: { board_slug: GSM_BOARD_SLUG.value },
     });
     const scope = (r && r.message) || { unlimited: true, allowed_units: [], permitted: true };
     gsmBoardAccess.value = { ...scope, loaded: true };
@@ -9429,7 +9456,7 @@ function persistDraft() {
       payload.rollLines = rollLines.value;
       payload.sessionSprs = sessionSprs.value;
     }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    localStorage.setItem(STORAGE_KEY.value, JSON.stringify(payload));
     if (!saveStatus.value || saveStatus.value === "Saved locally") {
       saveStatus.value = "Draft saved";
     }
@@ -9441,7 +9468,7 @@ function persistDraft() {
 function restoreDraft(options = {}) {
   const skipRollGrid = !!options.skipRollGrid;
   try {
-    let raw = localStorage.getItem(STORAGE_KEY);
+    let raw = localStorage.getItem(STORAGE_KEY.value);
     if (!raw) {
       raw = localStorage.getItem("gsm_production_entry_draft_v2");
     }

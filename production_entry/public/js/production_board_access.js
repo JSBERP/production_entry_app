@@ -15,6 +15,13 @@ const BOARD_SELECT_FALLBACK =
 	"confirm-orders|Confirm Orders\n" +
 	"planning|Planning\n" +
 	"gsm-production-entry|GSM Production Entry\n" +
+	"lamination-production-entry|Lamination Production Entry\n" +
+	"slitting-production-entry|Slitting Production Entry\n" +
+	"rewinding-production-entry|Rewinding Production Entry\n" +
+	"sheet-cutting-production-entry|Sheet Cutting Production Entry\n" +
+	"bopp-printing-production-entry|BOPP Printing Production Entry\n" +
+	"flexo-printing-production-entry|Flexo Printing Production Entry\n" +
+	"bag-making-production-entry|Bag Making Production Entry\n" +
 	"logistics-kanban|Logistics Kanban\n" +
 	"transfer-approval-dashboard|Transfer Approval\n" +
 	"despatch-approval-dashboard|Despatch Approval\n" +

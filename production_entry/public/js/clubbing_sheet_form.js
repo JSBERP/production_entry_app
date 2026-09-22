@@ -414,6 +414,9 @@ window.jsb_club_add_selected_items = function (frm, selections, orders_cache) {
 			if (has_field('despatch_sales_order')) {
 				rd.despatch_sales_order = '';
 			}
+			if (has_field('custom_shipping_address')) {
+				rd.custom_shipping_address = so.shipping_address_name || '';
+			}
 			if (has_field('planning_table_row')) {
 				rd.planning_table_row = so.planning_table_row || so.name || '';
 			}
@@ -671,6 +674,23 @@ frappe.ui.form.on('Clubbing Sheet', {
         frm.trigger('set_vehicle_no_options');
         jsb_club_bind_loading_sequence_lock_ui(frm);
         jsb_club_hide_view_rolls(frm);
+
+        if (frappe.meta.get_docfield('Clubbing Sheet Item', 'custom_shipping_address')) {
+            frm.set_query('custom_shipping_address', 'items', function (doc, cdt, cdn) {
+                let row = locals[cdt][cdn];
+                let cust = (row && (row.customer || row.custom_despatch_customer || row.despatch_customer)) || '';
+                if (!cust) {
+                    return { filters: { name: ['in', []] } };
+                }
+                return {
+                    query: 'frappe.contacts.doctype.address.address.address_query',
+                    filters: {
+                        link_doctype: 'Customer',
+                        link_name: cust
+                    }
+                };
+            });
+        }
     },
 
     vehicle_feet: function (frm) {
@@ -1036,11 +1056,34 @@ frappe.ui.form.on('Clubbing Sheet Item', {
                 if (!cust) return {};
                 return { filters: { customer: cust, docstatus: 1 } };
             });
+        if (grid.get_field('custom_shipping_address')) {
+            frm.set_query('custom_shipping_address', 'items', function (doc, cdt2, cdn2) {
+                let row = locals[cdt2][cdn2];
+                let cust = row.customer || row.custom_despatch_customer || row.despatch_customer;
+                if (!cust) {
+                    return { filters: { name: ['in', []] } };
+                }
+                return {
+                    query: 'frappe.contacts.doctype.address.address.address_query',
+                    filters: {
+                        link_doctype: 'Customer',
+                        link_name: cust
+                    }
+                };
+            });
+        }
     },
 
     custom_despatch_customer(frm, cdt, cdn) {
         // Clear override SO when despatch customer changes
         frappe.model.set_value(cdt, cdn, 'custom_despatch_sales_order', '');
+    },
+
+    customer(frm, cdt, cdn) {
+        // Clear shipping when customer changes so operator re-picks for the new party
+        if (frappe.meta.get_docfield('Clubbing Sheet Item', 'custom_shipping_address')) {
+            frappe.model.set_value(cdt, cdn, 'custom_shipping_address', '');
+        }
     },
 
     loading_sequence(frm, cdt, cdn) {

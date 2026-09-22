@@ -3084,26 +3084,6 @@ function spr_auto_save_draft_if_dirty(frm, opts) {
 		};
 		const doneErr = function (err) {
 			frm.__spr_auto_save_in_progress = false;
-			const msg = String((err && (err.message || err.exc || err)) || '');
-			// Concurrent GSM/API save won — reload instead of looping TimestampMismatch popups.
-			if (/modified after you have opened/i.test(msg) || /TimestampMismatch/i.test(msg)) {
-				try {
-					frm._spr_light_reload = true;
-					const reload = frm.reload_doc();
-					const clear = function () {
-						frm._spr_light_reload = false;
-						spr_mark_just_saved(frm);
-					};
-					if (reload && typeof reload.then === 'function') {
-						reload.then(clear).catch(clear);
-					} else {
-						clear();
-					}
-				} catch (e) {
-					/* ignore */
-				}
-				return;
-			}
 			if (opts.silentFail) {
 				return;
 			}
@@ -3164,9 +3144,11 @@ function spr_bind_external_roll_save_realtime(frm) {
 		if (cur.__spr_auto_save_in_progress || cur._spr_create_entry_in_progress) {
 			return;
 		}
-		// External GSM/API save already persisted on server. Never race another
-		// desk save when dirty (that caused "document has been modified" loops).
-		// Always reload to pick up server draft — discard client-only wastage dirties.
+		// External save already persisted — reload so the desk indicator stays Saved.
+		if (typeof cur.is_dirty === 'function' && cur.is_dirty()) {
+			spr_auto_save_draft_if_dirty(cur, { delay: 400, force: true, quiet: true });
+			return;
+		}
 		cur._spr_light_reload = true;
 		const reload = cur.reload_doc();
 		const mark = function () {
@@ -5148,6 +5130,22 @@ function spr_register_spr_page_buttons(frm) {
 					const qc = production_entry.spr_quality_check;
 					if (qc && typeof qc.openSprTensileTesting === 'function') {
 						qc.openSprTensileTesting(frm.doc.name);
+					} else {
+						frappe.msgprint(__('Quality Check helper not loaded.'));
+					}
+				},
+				tg
+			);
+		}
+	});
+	addInner(function () {
+		if (!frm.is_new() && cint(frm.doc.docstatus) === 0) {
+			frm.page.add_inner_button(
+				__('Colour Spectrum'),
+				function () {
+					const qc = production_entry.spr_quality_check;
+					if (qc && typeof qc.openSprColourSpectrum === 'function') {
+						qc.openSprColourSpectrum(frm.doc.name);
 					} else {
 						frappe.msgprint(__('Quality Check helper not loaded.'));
 					}
