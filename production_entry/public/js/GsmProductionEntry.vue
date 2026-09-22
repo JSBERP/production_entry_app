@@ -2000,21 +2000,58 @@ const STORAGE_KEY = computed(
 );
 const FABRIC_UNITS = ["Unit 1", "Unit 2", "Unit 3", "Unit 4"];
 const LAMINATION_UNIT = "TNSPL - LAMINATION UNIT";
-/** Units offered on GSM (fabric only). Lamination unit is only on lamination production entry. */
+const SLITTING_UNITS = ["JVE - SLITTING MACHINE", "VTP - SLITTING MACHINE"];
+const REWINDING_UNITS = [
+  "JSB - L5 REWINDING MACHINE",
+  "JSB - L4 REWINDING MACHINE",
+  "TSNPL - L3 REWINDING MACHINE",
+];
+const SHEET_CUTTING_UNITS = ["JVE - SHEET CUTTING MACHINE"];
+const FLEXO_PRINTING_UNITS = [
+  "TT - PRINTING MACHINE 4 COLOUR 1200MM",
+  "JVE - PRINTING MACHINE 4 COLOUR 1600MM",
+  "JVE - PRINTING MACHINE 2 COLOUR 1600MM",
+];
+const BOPP_PRINTING_UNITS = ["VR - 1200MM BOPP PRINTING MACHINE"];
+const BAG_MAKING_UNITS = [
+  "VTP-L1 LEADER OYANG MACHINE",
+  "VTP-L2 LEADER ZX MACHINE",
+  "VTP-L4 SCREEN PRINTING MACHINE",
+];
+/** Units offered on GSM (fabric only). Process pages use Workstation lists below. */
 const GSM_ENTRY_UNITS = [...FABRIC_UNITS];
 const showRollInputsBtn = computed(() => !!props.showRollInputs);
 const pageHeading = computed(() => String(props.pageTitle || "GSM Production Entry").trim());
 
+const processScopeKey = computed(() => String(props.processScope || "").trim());
 const isLaminationEntryPage = computed(() => {
-  const scope = String(props.processScope || "").trim();
-  const slug = BOARD_SLUG.value;
-  return scope === "lamination_only" || slug === "lamination-production-entry";
+  return processScopeKey.value === "lamination_only" || BOARD_SLUG.value === "lamination-production-entry";
 });
 
-/** Unit dropdown pool for this page (lamination page → lamination unit only; others → fabric units). */
+/** Unit dropdown pool for this production-entry page (Workstation names). */
 const pageEntryUnits = computed(() => {
-  if (isLaminationEntryPage.value) {
+  const scope = processScopeKey.value;
+  const slug = BOARD_SLUG.value;
+  if (scope === "lamination_only" || slug === "lamination-production-entry") {
     return [LAMINATION_UNIT];
+  }
+  if (scope === "slitting_only" || slug === "slitting-production-entry") {
+    return [...SLITTING_UNITS];
+  }
+  if (scope === "rewinding_only" || slug === "rewinding-production-entry") {
+    return [...REWINDING_UNITS];
+  }
+  if (scope === "sheet_cutting_only" || slug === "sheet-cutting-production-entry") {
+    return [...SHEET_CUTTING_UNITS];
+  }
+  if (scope === "printing_only" || slug === "flexo-printing-production-entry") {
+    return [...FLEXO_PRINTING_UNITS];
+  }
+  if (scope === "printed_bopp_pb_only" || slug === "bopp-printing-production-entry") {
+    return [...BOPP_PRINTING_UNITS];
+  }
+  if (scope === "box_bag_only" || slug === "bag-making-production-entry") {
+    return [...BAG_MAKING_UNITS];
   }
   return [...FABRIC_UNITS];
 });
@@ -3510,18 +3547,19 @@ function isLaminationUnit(unit) {
 
 function isGsmEntryUnit(unit) {
   const n = normalizeGsmUnit(unit);
-  if (isLaminationEntryPage.value) {
-    return isLaminationUnit(n);
-  }
-  return isFabricUnit(n);
+  if (!n) return false;
+  const allowed = pageEntryUnits.value.map((u) => normalizeGsmUnit(u));
+  return allowed.includes(n);
 }
 
 function normalizeGsmUnit(unit) {
   const u = _cstr(unit).trim();
-  if (isLaminationUnit(u)) {
+  if (!u) return "";
+  // Only collapse lamination aliases when this page is the lamination entry page
+  if (isLaminationEntryPage.value && (u.toUpperCase().includes("LAMINATION") || u === "Lamination Unit")) {
     return LAMINATION_UNIT;
   }
-  const m = u.match(/unit\s*(\d+)/i);
+  const m = u.match(/^unit\s*(\d+)$/i);
   if (m) {
     return `Unit ${m[1]}`;
   }
@@ -3763,27 +3801,19 @@ const unitOptions = computed(() => {
   const allowedSet = new Set(allowed.map((u) => normalizeGsmUnit(u)));
   const pool = gsmUnitFilterState.value.pool;
   if (pool && pool.length) {
-    const fromPool = pool
-      .map((u) => normalizeGsmUnit(u))
-      .filter((u) => allowedSet.has(u) || (isLaminationEntryPage.value && isLaminationUnit(u)));
+    const fromPool = pool.map((u) => normalizeGsmUnit(u)).filter((u) => allowedSet.has(u));
     const uniq = [...new Set(fromPool)];
     return uniq.length ? uniq : allowed;
   }
-  const s = new Set();
-  ppSubmittedRows.value.forEach((r) => {
-    if (r.unit && isGsmEntryUnit(r.unit)) {
-      s.add(normalizeGsmUnit(r.unit));
-    }
-  });
-  const out = allowed.filter((u) => s.has(normalizeGsmUnit(u)));
-  return out.length ? out : allowed;
+  // Always offer the page's Workstation list (do not hide units just because PP has no rows yet)
+  return allowed;
 });
 
 const fabricUnitOptions = computed(() => unitOptions.value.filter((u) => isFabricUnit(u)));
 
 const isLaminationMode = computed(() => {
   if (isLaminationEntryPage.value) return true;
-  const scope = String(props.processScope || "").trim();
+  const scope = processScopeKey.value;
   if (scope) return false;
   return isLaminationUnit(headerUnit.value || filterUnit.value);
 });
@@ -8527,22 +8557,23 @@ async function loadGsmBoardAccess() {
   scrubUnitSelectionToPage();
 }
 
-/** Drop lamination (or other) unit selections that do not belong on this page. */
+/** Drop unit selections that do not belong on this page; auto-pick when only one unit. */
 function scrubUnitSelectionToPage() {
   const allowed = pageEntryUnits.value.map((u) => normalizeGsmUnit(u));
   const ok = (u) => {
     const n = normalizeGsmUnit(u);
     return n && allowed.includes(n);
   };
+  const fallback = allowed.length === 1 ? allowed[0] : "";
   if (filterUnit.value && !ok(filterUnit.value)) {
-    filterUnit.value = isLaminationEntryPage.value ? LAMINATION_UNIT : "";
+    filterUnit.value = fallback;
   }
   if (headerUnit.value && !ok(headerUnit.value)) {
-    headerUnit.value = filterUnit.value || (isLaminationEntryPage.value ? LAMINATION_UNIT : "");
+    headerUnit.value = filterUnit.value || fallback;
   }
-  if (isLaminationEntryPage.value && !filterUnit.value) {
-    filterUnit.value = LAMINATION_UNIT;
-    headerUnit.value = LAMINATION_UNIT;
+  if (!filterUnit.value && fallback) {
+    filterUnit.value = fallback;
+    headerUnit.value = fallback;
   }
 }
 
