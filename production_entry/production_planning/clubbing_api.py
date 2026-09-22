@@ -19,6 +19,51 @@ def _cstr(v):
 	return cstr(v or "").strip()
 
 
+@frappe.whitelist()
+@frappe.validate_and_sanitize_search_inputs
+def clubbing_shipping_address_query(doctype, txt, searchfield, start, page_len, filters):
+	"""Address Link search for Clubbing Sheet Item — only addresses linked to the row customer."""
+	filters = frappe._dict(filters or {})
+	customer = _cstr(filters.get("customer"))
+	if not customer:
+		return []
+
+	# Resolve display name → Customer id when needed
+	if not frappe.db.exists("Customer", customer):
+		resolved = frappe.db.get_value("Customer", {"customer_name": customer}, "name")
+		if resolved:
+			customer = resolved
+		else:
+			return []
+
+	txt = _cstr(txt)
+	like = f"%{txt}%"
+	return frappe.db.sql(
+		"""
+		select addr.name, addr.address_title, addr.city, addr.country
+		from `tabAddress` addr
+		inner join `tabDynamic Link` dl
+			on dl.parent = addr.name
+			and dl.parenttype = 'Address'
+			and dl.link_doctype = 'Customer'
+			and dl.link_name = %(customer)s
+		where addr.docstatus < 2
+			and (
+				addr.name like %(txt)s
+				or ifnull(addr.address_title, '') like %(txt)s
+				or ifnull(addr.city, '') like %(txt)s
+				or ifnull(addr.address_line1, '') like %(txt)s
+			)
+		order by
+			ifnull(addr.is_shipping_address, 0) desc,
+			addr.address_title asc,
+			addr.name asc
+		limit %(start)s, %(page_len)s
+		""",
+		{"customer": customer, "txt": like, "start": start, "page_len": page_len},
+	)
+
+
 def _planned_date_expr():
 	"""Prefer custom_item_planned_date, else planned_date."""
 	has_custom = frappe.db.has_column("Planning Table", "custom_item_planned_date")

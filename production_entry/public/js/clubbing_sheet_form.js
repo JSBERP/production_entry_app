@@ -676,20 +676,38 @@ frappe.ui.form.on('Clubbing Sheet', {
         jsb_club_hide_view_rolls(frm);
 
         if (frappe.meta.get_docfield('Clubbing Sheet Item', 'custom_shipping_address')) {
+            frm.set_df_property('custom_shipping_address', 'reqd', 1, null, 'items');
             frm.set_query('custom_shipping_address', 'items', function (doc, cdt, cdn) {
-                let row = locals[cdt][cdn];
-                let cust = (row && (row.customer || row.custom_despatch_customer || row.despatch_customer)) || '';
+                let row = locals[cdt][cdn] || {};
+                let cust = (row.customer || row.custom_despatch_customer || row.despatch_customer || '').trim();
                 if (!cust) {
-                    return { filters: { name: ['in', []] } };
+                    return {
+                        query: 'production_entry.production_planning.clubbing_api.clubbing_shipping_address_query',
+                        filters: { customer: '' }
+                    };
                 }
                 return {
-                    query: 'frappe.contacts.doctype.address.address.address_query',
-                    filters: {
-                        link_doctype: 'Customer',
-                        link_name: cust
-                    }
+                    query: 'production_entry.production_planning.clubbing_api.clubbing_shipping_address_query',
+                    filters: { customer: cust }
                 };
             });
+        }
+    },
+
+    validate: function (frm) {
+        if (!frappe.meta.get_docfield('Clubbing Sheet Item', 'custom_shipping_address')) {
+            return;
+        }
+        const missing = [];
+        (frm.doc.items || []).forEach(function (row, idx) {
+            if (!(row.custom_shipping_address || '').trim()) {
+                missing.push(idx + 1);
+            }
+        });
+        if (missing.length) {
+            frappe.throw(
+                __('Shipping Address is mandatory on Items row(s): {0}', [missing.join(', ')])
+            );
         }
     },
 
@@ -1057,30 +1075,28 @@ frappe.ui.form.on('Clubbing Sheet Item', {
                 return { filters: { customer: cust, docstatus: 1 } };
             });
         if (grid.get_field('custom_shipping_address')) {
+            frm.set_df_property('custom_shipping_address', 'reqd', 1, null, 'items');
             frm.set_query('custom_shipping_address', 'items', function (doc, cdt2, cdn2) {
-                let row = locals[cdt2][cdn2];
-                let cust = row.customer || row.custom_despatch_customer || row.despatch_customer;
-                if (!cust) {
-                    return { filters: { name: ['in', []] } };
-                }
+                let row = locals[cdt2][cdn2] || {};
+                let cust = (row.customer || row.custom_despatch_customer || row.despatch_customer || '').trim();
                 return {
-                    query: 'frappe.contacts.doctype.address.address.address_query',
-                    filters: {
-                        link_doctype: 'Customer',
-                        link_name: cust
-                    }
+                    query: 'production_entry.production_planning.clubbing_api.clubbing_shipping_address_query',
+                    filters: { customer: cust || '' }
                 };
             });
+        }
+    },
+
+    customer(frm, cdt, cdn) {
+        // Clear shipping when customer changes so operator re-picks for the new party
+        if (frappe.meta.get_docfield('Clubbing Sheet Item', 'custom_shipping_address')) {
+            frappe.model.set_value(cdt, cdn, 'custom_shipping_address', '');
         }
     },
 
     custom_despatch_customer(frm, cdt, cdn) {
         // Clear override SO when despatch customer changes
         frappe.model.set_value(cdt, cdn, 'custom_despatch_sales_order', '');
-    },
-
-    customer(frm, cdt, cdn) {
-        // Clear shipping when customer changes so operator re-picks for the new party
         if (frappe.meta.get_docfield('Clubbing Sheet Item', 'custom_shipping_address')) {
             frappe.model.set_value(cdt, cdn, 'custom_shipping_address', '');
         }

@@ -2000,9 +2000,24 @@ const STORAGE_KEY = computed(
 );
 const FABRIC_UNITS = ["Unit 1", "Unit 2", "Unit 3", "Unit 4"];
 const LAMINATION_UNIT = "TNSPL - LAMINATION UNIT";
-const GSM_ENTRY_UNITS = [...FABRIC_UNITS, LAMINATION_UNIT];
+/** Units offered on GSM (fabric only). Lamination unit is only on lamination production entry. */
+const GSM_ENTRY_UNITS = [...FABRIC_UNITS];
 const showRollInputsBtn = computed(() => !!props.showRollInputs);
 const pageHeading = computed(() => String(props.pageTitle || "GSM Production Entry").trim());
+
+const isLaminationEntryPage = computed(() => {
+  const scope = String(props.processScope || "").trim();
+  const slug = BOARD_SLUG.value;
+  return scope === "lamination_only" || slug === "lamination-production-entry";
+});
+
+/** Unit dropdown pool for this page (lamination page → lamination unit only; others → fabric units). */
+const pageEntryUnits = computed(() => {
+  if (isLaminationEntryPage.value) {
+    return [LAMINATION_UNIT];
+  }
+  return [...FABRIC_UNITS];
+});
 
 const viewScope = ref("daily");
 const filterDate = ref(frappe.datetime.get_today());
@@ -3494,7 +3509,11 @@ function isLaminationUnit(unit) {
 }
 
 function isGsmEntryUnit(unit) {
-  return isFabricUnit(unit) || isLaminationUnit(unit);
+  const n = normalizeGsmUnit(unit);
+  if (isLaminationEntryPage.value) {
+    return isLaminationUnit(n);
+  }
+  return isFabricUnit(n);
 }
 
 function normalizeGsmUnit(unit) {
@@ -3740,9 +3759,15 @@ function buildLineFromItem(item) {
 }
 
 const unitOptions = computed(() => {
+  const allowed = pageEntryUnits.value;
+  const allowedSet = new Set(allowed.map((u) => normalizeGsmUnit(u)));
   const pool = gsmUnitFilterState.value.pool;
   if (pool && pool.length) {
-    return pool.filter((u) => isGsmEntryUnit(u));
+    const fromPool = pool
+      .map((u) => normalizeGsmUnit(u))
+      .filter((u) => allowedSet.has(u) || (isLaminationEntryPage.value && isLaminationUnit(u)));
+    const uniq = [...new Set(fromPool)];
+    return uniq.length ? uniq : allowed;
   }
   const s = new Set();
   ppSubmittedRows.value.forEach((r) => {
@@ -3750,16 +3775,15 @@ const unitOptions = computed(() => {
       s.add(normalizeGsmUnit(r.unit));
     }
   });
-  // Always offer fabric units that appear + Lamination when present or always available
-  const out = GSM_ENTRY_UNITS.filter((u) => s.has(u) || isLaminationUnit(u));
-  return out.length ? out : GSM_ENTRY_UNITS;
+  const out = allowed.filter((u) => s.has(normalizeGsmUnit(u)));
+  return out.length ? out : allowed;
 });
 
 const fabricUnitOptions = computed(() => unitOptions.value.filter((u) => isFabricUnit(u)));
 
 const isLaminationMode = computed(() => {
+  if (isLaminationEntryPage.value) return true;
   const scope = String(props.processScope || "").trim();
-  if (scope === "lamination_only") return true;
   if (scope) return false;
   return isLaminationUnit(headerUnit.value || filterUnit.value);
 });
@@ -8493,12 +8517,32 @@ async function loadGsmBoardAccess() {
     if (!scope || scope.unlimited) {
       gsmUnitFilterState.value = { pool: null, showUnitFilter: true, unitLocked: false };
     } else {
-      gsmUnitFilterState.value = applyBoardAccessUnitScope(scope, filterUnit, GSM_ENTRY_UNITS);
+      gsmUnitFilterState.value = applyBoardAccessUnitScope(scope, filterUnit, pageEntryUnits.value);
     }
   } catch (e) {
     console.warn("gsm board access", e);
     gsmBoardAccess.value = { unlimited: true, allowed_units: [], loaded: true, permitted: true, frozen_actions: {} };
     gsmUnitFilterState.value = { pool: null, showUnitFilter: true, unitLocked: false };
+  }
+  scrubUnitSelectionToPage();
+}
+
+/** Drop lamination (or other) unit selections that do not belong on this page. */
+function scrubUnitSelectionToPage() {
+  const allowed = pageEntryUnits.value.map((u) => normalizeGsmUnit(u));
+  const ok = (u) => {
+    const n = normalizeGsmUnit(u);
+    return n && allowed.includes(n);
+  };
+  if (filterUnit.value && !ok(filterUnit.value)) {
+    filterUnit.value = isLaminationEntryPage.value ? LAMINATION_UNIT : "";
+  }
+  if (headerUnit.value && !ok(headerUnit.value)) {
+    headerUnit.value = filterUnit.value || (isLaminationEntryPage.value ? LAMINATION_UNIT : "");
+  }
+  if (isLaminationEntryPage.value && !filterUnit.value) {
+    filterUnit.value = LAMINATION_UNIT;
+    headerUnit.value = LAMINATION_UNIT;
   }
 }
 

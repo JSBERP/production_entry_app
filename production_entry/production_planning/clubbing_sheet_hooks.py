@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import frappe
+from frappe import _
 from frappe.utils import cint, cstr, flt
 
 # Shared Madurai → destination belts (lowercase city names).
@@ -84,12 +85,60 @@ def clubbing_sheet_before_save(doc, method=None):
 	"""Customer fix, total weight, load type, route belt, distance, loading sequence."""
 	_fix_customers_from_so(doc)
 	_default_despatch_customer(doc)
+	_validate_shipping_address_required(doc)
 	_set_total_weight(doc)
 	_set_load_type(doc)
 	_validate_route_belt(doc)
 	_set_distances_and_loading_sequence(doc)
 	# Avoid noisy link validation when customer display names are off
 	doc.flags.ignore_links = True
+
+
+def _validate_shipping_address_required(doc):
+	"""Each item row must have a shipping address belonging to that row's customer."""
+	if not frappe.db.has_column("Clubbing Sheet Item", "custom_shipping_address"):
+		return
+	missing = []
+	wrong_customer = []
+	for idx, item in enumerate(doc.get("items") or [], start=1):
+		ship = cstr(item.get("custom_shipping_address") or "").strip()
+		cust = cstr(
+			item.get("customer")
+			or item.get("custom_despatch_customer")
+			or item.get("despatch_customer")
+			or ""
+		).strip()
+		if not ship:
+			missing.append(idx)
+			continue
+		if not cust:
+			continue
+		cust_id = cust
+		if not frappe.db.exists("Customer", cust_id):
+			cust_id = frappe.db.get_value("Customer", {"customer_name": cust}, "name") or cust
+		linked = frappe.db.exists(
+			"Dynamic Link",
+			{
+				"parenttype": "Address",
+				"parent": ship,
+				"link_doctype": "Customer",
+				"link_name": cust_id,
+			},
+		)
+		if not linked:
+			wrong_customer.append(idx)
+	if missing:
+		frappe.throw(
+			_("Shipping Address is mandatory on Clubbing Sheet Item row(s): {0}").format(
+				", ".join(str(i) for i in missing)
+			)
+		)
+	if wrong_customer:
+		frappe.throw(
+			_("Shipping Address on row(s) {0} does not belong to that row's customer.").format(
+				", ".join(str(i) for i in wrong_customer)
+			)
+		)
 
 
 def _default_despatch_customer(doc):

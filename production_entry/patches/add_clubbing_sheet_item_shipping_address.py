@@ -19,6 +19,7 @@ def execute():
 			"label": "Shipping Address",
 			"fieldtype": "Link",
 			"options": "Address",
+			"reqd": 1,
 			"in_list_view": 1,
 			"insert_after": "customer",
 		},
