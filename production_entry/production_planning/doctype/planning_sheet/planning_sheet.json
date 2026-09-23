@@ -174,8 +174,9 @@
   },
   {
    "fieldname": "order_sheet",
-   "fieldtype": "Data",
-   "label": "Order Sheet"
+   "fieldtype": "Link",
+   "label": "Order Sheet",
+   "options": "Production Plan"
   },
   {
    "fieldname": "custom_plan_name",

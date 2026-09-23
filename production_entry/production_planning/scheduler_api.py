@@ -76,8 +76,12 @@ def _normalize_filter_date(value):
 
 
 # Party / order code auto-generation (MonthLetter+YY+NNN + SO writeback).
-# Set True to enable; False disables all calls (no codes generated, no SO writeback from this path).
+# Keep False — order codes are minted only via Planning Sheet "Generate Order Code" button.
 PARTY_CODE_GENERATION_ENABLED = False
+# Manual button series floor: first code for prefix I26 is I26154 (then I26155…).
+ORDER_CODE_SERIES_FLOOR_BY_PREFIX = {
+	"I26": 154,
+}
 
 # Lamination: SO lines with item 104 (laminated FG) get a paired fabric (100*) row from BOM on the same Planning sheet.
 # board_process_scope filters chart/board rows by item process (see get_color_chart_data; default fabric-only).
@@ -12796,6 +12800,99 @@ def _sync_generated_order_code_to_sales_order(so_name, party_code):
             frappe.db.set_value("Sales Order", so_name, "custom_order_code", party_code, update_modified=True)
 
 
+def _order_code_month_prefix(dt=None):
+	"""Return MonthLetter+YY prefix, e.g. I26 for September 2026."""
+	dt = dt or frappe.utils.now_datetime()
+	mm = int(getattr(dt, "month", 1) or 1)
+	mm = max(1, min(12, mm))
+	yy = str(getattr(dt, "year", frappe.utils.now_datetime().year))[-2:]
+	return chr(ord("A") + mm - 1) + yy
+
+
+def _next_manual_order_code():
+	"""Next party/order code for button mint. Floor for I26 is 154 → first code I26154."""
+	prefix = _order_code_month_prefix()
+	floor = int(ORDER_CODE_SERIES_FLOOR_BY_PREFIX.get(prefix, 1) or 1)
+	last_code = frappe.db.sql(
+		"""
+		SELECT party_code
+		FROM `tabPlanning sheet`
+		WHERE IFNULL(party_code, '') != ''
+		  AND party_code LIKE %(prefix)s
+		ORDER BY CAST(SUBSTRING(party_code, %(offset)s) AS UNSIGNED) DESC
+		LIMIT 1
+		""",
+		{"prefix": prefix + "%", "offset": len(prefix) + 1},
+		as_dict=1,
+	)
+	series = floor
+	if last_code and last_code[0].get("party_code"):
+		try:
+			series = max(int(str(last_code[0]["party_code"])[len(prefix) :]) + 1, floor)
+		except Exception:
+			series = floor
+	if series > 9999:
+		frappe.throw(_("Order code series exhausted for prefix {0}.").format(prefix))
+	width = 3 if series <= 999 else 4
+	return prefix + str(series).zfill(width)
+
+
+@frappe.whitelist()
+def generate_planning_sheet_order_code(planning_sheet_name):
+	"""Manual only: mint order code onto Planning sheet.party_code, then Sales Order.custom_party_code.
+
+	- Does nothing if party_code already has a value.
+	- No auto-generation elsewhere (PARTY_CODE_GENERATION_ENABLED stays False).
+	- Series for I26 starts at I26154.
+	"""
+	name = _cstr(planning_sheet_name)
+	if not name:
+		frappe.throw(_("Planning Sheet is required."))
+	if not frappe.db.exists("Planning sheet", name):
+		frappe.throw(_("Planning Sheet {0} not found.").format(name))
+
+	ps = frappe.get_doc("Planning sheet", name)
+	existing = _cstr(ps.get("party_code"))
+	if existing:
+		return {
+			"ok": False,
+			"skipped": True,
+			"party_code": existing,
+			"message": _("Party Code already set to {0}. Left unchanged.").format(existing),
+		}
+
+	code = _next_manual_order_code()
+
+	# 1) Planning sheet party_code first
+	ps.db_set("party_code", code, update_modified=True)
+
+	# 2) Sales Order custom_party_code second
+	so_name = _cstr(ps.get("sales_order"))
+	so_updated = False
+	if so_name and frappe.db.exists("Sales Order", so_name):
+		if frappe.db.has_column("Sales Order", "custom_party_code"):
+			frappe.db.set_value(
+				"Sales Order", so_name, "custom_party_code", code, update_modified=True
+			)
+			so_updated = True
+		elif frappe.db.has_column("Sales Order", "party_code"):
+			frappe.db.set_value("Sales Order", so_name, "party_code", code, update_modified=True)
+			so_updated = True
+
+	return {
+		"ok": True,
+		"skipped": False,
+		"party_code": code,
+		"planning_sheet": name,
+		"sales_order": so_name or "",
+		"sales_order_updated": so_updated,
+		"message": _("Order code {0} set on Planning Sheet{1}.").format(
+			code,
+			_(" and Sales Order") if so_updated else "",
+		),
+	}
+
+
 def generate_party_code(doc):
     """
     Generate or reuse party_code (order code) for Planning sheet / Sales Order.
@@ -16604,14 +16701,9 @@ def _populate_planning_sheet_items(ps, doc):
             target_field = field
             break
 
-    # Fix: Use a list-based map (1:N) instead of a single mapping (1:1) to support split rows
-    from collections import defaultdict
-    existing_items_map = defaultdict(list)
-    raw_list = getattr(ps, target_field, ps.get("items", []))
-    for it in raw_list:
-        _so_key = (getattr(it, "sales_order_item", None) or getattr(it, "so_item", None) or "").strip()
-        if _so_key:
-            existing_items_map[_so_key].append(it)
+    # Fix: map SOI → rows from ALL child tables (planned_items + items) so updates
+    # override in place instead of appending a second FG row.
+    existing_items_map = _planning_sheet_existing_soi_map(ps)
 
     # ... [Quality Lookup Logic] ...
     quality_lookup = list(QUAL_LIST)
@@ -24868,7 +24960,13 @@ def _get_confirm_orders_unit_options_list():
 	units = []
 	seen = set()
 	try:
-		for name in frappe.get_all("Workstation", pluck="name", order_by="name", limit_page_length=0) or []:
+		for name in frappe.get_all(
+			"Workstation",
+			pluck="name",
+			order_by="name",
+			limit_page_length=0,
+			ignore_permissions=True,
+		) or []:
 			label = str(name or "").strip()
 			if not label or label in seen:
 				continue
@@ -24878,19 +24976,13 @@ def _get_confirm_orders_unit_options_list():
 		pass
 
 	# When Production Board Access limits units, keep only workstations in that scope.
+	# Use is_unit_allowed (no throw) — assert_unit_allowed would spam "Not permitted" into message_log.
 	try:
-		from production_entry.production_planning.board_access import assert_unit_allowed, get_user_board_scope
+		from production_entry.production_planning.board_access import get_user_board_scope, is_unit_allowed
 
 		scope = get_user_board_scope()
 		if scope and not scope.get("unlimited") and (scope.get("allowed_units") or []):
-			filtered = []
-			for u in units:
-				try:
-					assert_unit_allowed(u, scope=scope)
-					filtered.append(u)
-				except Exception:
-					continue
-			units = filtered
+			units = [u for u in units if is_unit_allowed(u, scope=scope)]
 	except Exception:
 		pass
 
@@ -25194,7 +25286,7 @@ def _get_confirm_orders_company_kanban_impl(order_date=None, start_date=None, en
         return cards[key]
 
     # Show every company as a card (priority order), even if it has no confirmed sheets yet.
-    for comp in frappe.get_all("Company", pluck="name"):
+    for comp in frappe.get_all("Company", pluck="name", ignore_permissions=True):
         _card_for(comp)
 
     for s in sheets:
@@ -25233,7 +25325,11 @@ def _get_confirm_orders_company_kanban_impl(order_date=None, start_date=None, en
 def get_confirm_orders_unit_options():
     """Workstation list for Confirm Orders unit filter dropdown."""
     try:
+        enforce_board_read(request_board_slug("confirm-orders"))
         return _get_confirm_orders_unit_options_list()
+    except frappe.PermissionError:
+        frappe.clear_messages()
+        return []
     except Exception:
         frappe.log_error(frappe.get_traceback(), "get_confirm_orders_unit_options_error")
         return []
@@ -25243,6 +25339,13 @@ def get_confirm_orders_unit_options():
 def get_confirm_orders_company_kanban(order_date=None, start_date=None, end_date=None, order_code=None, customer=None, unit=None):
     """Safe wrapper so the Confirm Orders page never 502s on schema drift."""
     try:
+        enforce_board_read(
+            request_board_slug("confirm-orders"),
+            unit=unit,
+            date=order_date,
+            start_date=start_date,
+            end_date=end_date,
+        )
         return _get_confirm_orders_company_kanban_impl(
             order_date=order_date,
             start_date=start_date,
@@ -25251,6 +25354,9 @@ def get_confirm_orders_company_kanban(order_date=None, start_date=None, end_date
             customer=customer,
             unit=unit,
         )
+    except frappe.PermissionError:
+        frappe.clear_messages()
+        return {"companies": [], "unitOptions": []}
     except Exception:
         frappe.log_error(frappe.get_traceback(), "get_confirm_orders_company_kanban_error")
         return {"companies": [], "unitOptions": _get_confirm_orders_unit_options_list()}
@@ -27748,7 +27854,12 @@ def regenerate_planning_sheet(so_name):
 
 
 def _existing_fg_sales_order_item_names_on_planning_sheet(planning_sheet_name, sales_order_doc):
-	"""SO item names that already have an FG row (planning row item_code = SO line FG)."""
+	"""SO item names that already have a planning row (FG preferred; any SOI link counts).
+
+	Previously only FG item_code matches counted as existing — when FG code drifted or
+	SOI was only on BOM children / the other child table, Update Planning Sheet treated
+	the line as new and appended duplicates.
+	"""
 	so_fg_by_soi = {
 		it.name: _cstr(it.item_code).strip()
 		for it in (getattr(sales_order_doc, "items", None) or [])
@@ -27763,11 +27874,51 @@ def _existing_fg_sales_order_item_names_on_planning_sheet(planning_sheet_name, s
 		if frappe.db.has_column(doctype, "custom_sales_order_item"):
 			fields.append("custom_sales_order_item")
 		for r in frappe.get_all(doctype, filters={"parent": planning_sheet_name}, fields=fields):
-			soik = _cstr(r.get("sales_order_item") or r.get("custom_sales_order_item") or r.get("so_item")).strip()
+			soik = _cstr(
+				r.get("sales_order_item") or r.get("custom_sales_order_item") or r.get("so_item")
+			).strip()
+			if not soik:
+				continue
+			# Any linked SOI counts as existing (prevents duplicate append).
+			if soik in so_fg_by_soi:
+				existing_soi.add(soik)
+				continue
 			fg = so_fg_by_soi.get(soik) or ""
 			if soik and fg and _cstr(r.get("item_code")).strip() == fg:
 				existing_soi.add(soik)
 	return existing_soi
+
+
+def _planning_sheet_existing_soi_map(ps):
+	"""Build SOI → [row,…] from every planning child table on the sheet doc."""
+	from collections import defaultdict
+
+	existing_items_map = defaultdict(list)
+	seen_row_ids = set()
+	for field in (
+		"planned_items",
+		"custom_planned_items",
+		"planning_table",
+		"custom_planning_table",
+		"table",
+		"items",
+	):
+		if not (hasattr(ps, field) or ps.meta.has_field(field)):
+			continue
+		for it in list(getattr(ps, field, None) or ps.get(field) or []):
+			row_id = getattr(it, "name", None) or id(it)
+			if row_id in seen_row_ids:
+				continue
+			seen_row_ids.add(row_id)
+			_so_key = _cstr(
+				getattr(it, "sales_order_item", None)
+				or getattr(it, "so_item", None)
+				or getattr(it, "custom_sales_order_item", None)
+				or ""
+			).strip()
+			if _so_key:
+				existing_items_map[_so_key].append(it)
+	return existing_items_map
 
 
 def _update_fg_qty_meter_on_planning_sheet_doc(ps, so_item):
@@ -27777,28 +27928,28 @@ def _update_fg_qty_meter_on_planning_sheet_doc(ps, so_item):
 	if not fg or not soi:
 		return 0
 	updated = 0
-	for row in list(ps.get("planned_items") or []):
-		row_soi = _cstr(getattr(row, "sales_order_item", None) or getattr(row, "so_item", None)).strip()
-		if row_soi != soi or _cstr(row.item_code).strip() != fg:
-			continue
-		row.qty = flt(so_item.qty)
-		row.uom = so_item.uom
-		row.meter = flt(so_item.get("custom_meter") or 0)
-		if hasattr(row, "custom_meter"):
-			row.custom_meter = flt(so_item.get("custom_meter") or 0)
-		row.meter_per_roll = flt(so_item.get("custom_meter_per_roll") or 0)
-		row.no_of_rolls = flt(so_item.get("custom_no_of_rolls") or 0)
-		updated += 1
-	for row in list(ps.get("items") or []):
-		row_soi = _cstr(getattr(row, "so_item", None) or getattr(row, "sales_order_item", None)).strip()
-		if row_soi != soi or _cstr(row.item_code).strip() != fg:
-			continue
-		row.qty = flt(so_item.qty)
-		row.uom = so_item.uom
-		row.meter = flt(so_item.get("custom_meter") or 0)
-		row.meter_per_roll = flt(so_item.get("custom_meter_per_roll") or 0)
-		row.no_of_rolls = flt(so_item.get("custom_no_of_rolls") or 0)
-		updated += 1
+	tables = []
+	for field in ("planned_items", "items"):
+		if hasattr(ps, field) or ps.meta.has_field(field):
+			tables.append(list(ps.get(field) or []))
+	for rows in tables:
+		for row in rows:
+			row_soi = _cstr(
+				getattr(row, "sales_order_item", None)
+				or getattr(row, "so_item", None)
+				or getattr(row, "custom_sales_order_item", None)
+				or ""
+			).strip()
+			if row_soi != soi or _cstr(row.item_code).strip() != fg:
+				continue
+			row.qty = flt(so_item.qty)
+			row.uom = so_item.uom
+			row.meter = flt(so_item.get("custom_meter") or 0)
+			if hasattr(row, "custom_meter"):
+				row.custom_meter = flt(so_item.get("custom_meter") or 0)
+			row.meter_per_roll = flt(so_item.get("custom_meter_per_roll") or 0)
+			row.no_of_rolls = flt(so_item.get("custom_no_of_rolls") or 0)
+			updated += 1
 	return updated
 
 
@@ -27816,18 +27967,128 @@ def planning_sheet_post_sync_only(planning_sheet):
 
 
 @frappe.whitelist()
-def update_planning_sheet_from_sales_order(sales_order):
-	"""Partial update: Sales Order → draft Planning Sheet (Update Items button).
+def prepare_sales_order_for_update(sales_order):
+	"""Reopen a submitted Sales Order as Draft (same name) so the full form can be edited.
 
-	- Existing SO lines: FG qty/meter/rolls + BOM parent/child qty rescale (post-sync, no table wipe).
-	- New SO lines: ``_populate_planning_sheet_items`` + ``_run_planning_sheet_post_sync``.
-	- Design name/attachment backfilled via ``_stamp_design_fields_on_planning_sheet`` in post-sync.
+	Keeps Sales Order Item ``name`` keys stable so Planning Sheet rows continue to match
+	and **Update Planning Sheet** can override instead of appending duplicates.
+
+	Workflow: Update → edit Draft → Submit → Update Planning Sheet.
+	"""
+	so_name = _cstr(sales_order).strip()
+	if not so_name or not frappe.db.exists("Sales Order", so_name):
+		frappe.throw(_("Sales Order required"))
+
+	so = frappe.get_doc("Sales Order", so_name)
+	if cint(so.docstatus) == 0:
+		return {
+			"ok": True,
+			"reopened": False,
+			"sales_order": so.name,
+			"message": _("Sales Order is already Draft — edit, Submit, then Update Planning Sheet."),
+		}
+	if cint(so.docstatus) != 1:
+		frappe.throw(_("Only submitted Sales Orders can be prepared for update."))
+
+	# Cancel first (standard), then reopen the same document as Draft.
+	so.flags.ignore_permissions = True
+	so.cancel()
+
+	# Reopen same name — preserves SO Item names used as Planning Sheet keys.
+	frappe.db.sql(
+		"""
+		update `tabSales Order`
+		set docstatus = 0, status = 'Draft'
+		where name = %s
+		""",
+		so_name,
+	)
+	frappe.db.sql(
+		"""
+		update `tabSales Order Item`
+		set docstatus = 0
+		where parent = %s
+		""",
+		so_name,
+	)
+	# Child tax / payment schedule rows if present
+	for child_dt in (
+		"Sales Taxes and Charges",
+		"Sales Order Item",
+		"Payment Schedule",
+		"Sales Team",
+	):
+		if frappe.db.exists("DocType", child_dt) and frappe.db.has_column(child_dt, "docstatus"):
+			try:
+				frappe.db.sql(
+					f"update `tab{child_dt}` set docstatus = 0 where parent = %s",
+					so_name,
+				)
+			except Exception:
+				pass
+
+	if frappe.db.has_column("Sales Order", "custom_update_count"):
+		frappe.db.set_value(
+			"Sales Order",
+			so_name,
+			"custom_update_count",
+			cint(frappe.db.get_value("Sales Order", so_name, "custom_update_count") or 0) + 1,
+			update_modified=False,
+		)
+
+	frappe.clear_cache(doctype="Sales Order")
+	return {
+		"ok": True,
+		"reopened": True,
+		"sales_order": so_name,
+		"message": _("Sales Order reopened as Draft. Edit the full form, Submit, then Update Planning Sheet."),
+	}
+
+
+def _retarget_draft_planning_sheets(old_so, new_so):
+	"""Point draft Planning Sheets from old SO → new SO (amendment helper)."""
+	old_so = _cstr(old_so)
+	new_so = _cstr(new_so)
+	if not old_so or not new_so:
+		return
+	for ps_name in frappe.get_all(
+		"Planning sheet",
+		filters={"sales_order": old_so, "docstatus": 0},
+		pluck="name",
+	) or []:
+		frappe.db.set_value("Planning sheet", ps_name, "sales_order", new_so, update_modified=False)
+
+
+def sales_order_after_insert_retarget_planning(doc, method=None):
+	"""If this SO is an amendment, retarget any draft Planning Sheet still on amended_from."""
+	amended_from = _cstr(getattr(doc, "amended_from", None))
+	if not amended_from:
+		return
+	_retarget_draft_planning_sheets(amended_from, doc.name)
+
+
+@frappe.whitelist()
+def update_planning_sheet_from_sales_order(sales_order):
+	"""Partial update: Sales Order → draft Planning Sheet (Update Planning Sheet button).
+
+	- Existing SO lines: upsert FG qty/meter/rolls (override same row; no duplicate append).
+	- New SO lines only: append via ``_populate_planning_sheet_items``.
+	- Always dedupe exact duplicate Planning Table rows after save.
 	"""
 	so_name = _cstr(sales_order).strip()
 	if not so_name:
 		frappe.throw(_("Sales Order required"))
 
 	ps_name = frappe.db.get_value("Planning sheet", {"sales_order": so_name, "docstatus": 0}, "name")
+	if not ps_name:
+		# Follow amendment chain (Update → amend SO keeps Planning Sheet retargeted, but be safe)
+		amended_from = frappe.db.get_value("Sales Order", so_name, "amended_from")
+		if amended_from:
+			ps_name = frappe.db.get_value(
+				"Planning sheet", {"sales_order": amended_from, "docstatus": 0}, "name"
+			)
+			if ps_name:
+				frappe.db.set_value("Planning sheet", ps_name, "sales_order", so_name, update_modified=False)
 	if not ps_name:
 		frappe.throw(_("No Draft Planning Sheet for this Sales Order"))
 
@@ -27852,8 +28113,9 @@ def update_planning_sheet_from_sales_order(sales_order):
 		else:
 			had_new = True
 
-	if had_new:
-		_populate_planning_sheet_items(ps, so)
+	# Always upsert via populate — existing SOI rows are updated in place when the
+	# dual-table SOI map is correct (see ``_planning_sheet_existing_soi_map``).
+	_populate_planning_sheet_items(ps, so)
 
 	ensure_lamination_booking_for_planning_sheet(ps)
 	update_sheet_plan_codes(ps, include_legacy=True)
@@ -27861,10 +28123,16 @@ def update_planning_sheet_from_sales_order(sales_order):
 	ps.save(ignore_permissions=True)
 	frappe.db.commit()
 
+	try:
+		_remove_exact_duplicate_pt_rows_on_sheet(ps.name)
+		frappe.db.commit()
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "update_planning_sheet_from_sales_order:dedupe")
+
 	if had_new:
 		_run_planning_sheet_post_sync(ps.name)
 		frappe.db.commit()
-	elif fg_updates:
+	elif fg_updates or existing_soi:
 		for it in so.items:
 			if it.name in existing_soi:
 				_align_so_line_bom_parent_qty_from_sales_order(ps.name, it)
@@ -27882,9 +28150,9 @@ def update_planning_sheet_from_sales_order(sales_order):
 
 	msg = _("Planning Sheet updated.")
 	if had_new:
-		msg = _("Planning Sheet updated. New line(s) added with BOM sync (108/255/253/251/…).")
-	elif fg_updates:
-		msg = _("Planning Sheet updated. Qty / meter / rolls and BOM child quantities rescaled.")
+		msg = _("Planning Sheet updated. New line(s) added with BOM sync.")
+	elif fg_updates or existing_soi:
+		msg = _("Planning Sheet updated. Existing lines overridden (qty / meter / rolls).")
 
 	return {
 		"ok": True,

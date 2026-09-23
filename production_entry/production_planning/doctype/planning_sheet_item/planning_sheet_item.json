@@ -322,8 +322,9 @@
         },
         {
             "fieldname": "order_sheet",
-            "fieldtype": "Data",
+            "fieldtype": "Link",
             "label": "Order Sheet",
+            "options": "Production Plan",
             "in_list_view": 0
         },
         {
