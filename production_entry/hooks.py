@@ -165,7 +165,6 @@ _DESIGN_MASTER_HOOKS = {
 doc_events = {
     "Sales Order": {
         "on_submit": "production_entry.production_planning.scheduler_api.auto_create_planning_sheet",
-        "after_insert": "production_entry.production_planning.scheduler_api.sales_order_after_insert_retarget_planning",
     },
     "Planning sheet": {
         "before_validate": "production_entry.production_planning.scheduler_hooks.planning_sheet_before_validate",
