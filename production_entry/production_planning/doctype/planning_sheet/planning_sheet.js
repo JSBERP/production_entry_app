@@ -3,6 +3,37 @@
 frappe.ui.form.on('Planning sheet', {
 	refresh(frm) {
 		if (!frm.is_new()) {
+			frm.add_custom_button(__('Generate Order Code'), function () {
+				if ((frm.doc.party_code || '').trim()) {
+					frappe.show_alert({
+						message: __('Party Code already set to {0}. Left unchanged.', [frm.doc.party_code]),
+						indicator: 'blue',
+					});
+					return;
+				}
+				frappe.call({
+					method: 'production_entry.production_planning.scheduler_api.generate_planning_sheet_order_code',
+					args: { planning_sheet_name: frm.doc.name },
+					freeze: true,
+					freeze_message: __('Generating order code…'),
+					callback(r) {
+						if (r.exc) {
+							return;
+						}
+						const msg = r.message || {};
+						frappe.show_alert({
+							message: msg.message || __('Done'),
+							indicator: msg.ok ? 'green' : 'blue',
+						});
+						if (typeof ps_reload_planning_sheet_doc === 'function') {
+							ps_reload_planning_sheet_doc(frm);
+						} else {
+							frm.reload_doc();
+						}
+					},
+				});
+			}, __('Actions'));
+
 			frm.add_custom_button(__('Meter to Kgs (All Bag BOM)'), function () {
 				frappe.call({
 					method: 'production_entry.production_planning.scheduler_api.convert_meter_to_kgs_for_box_bag_bom',
