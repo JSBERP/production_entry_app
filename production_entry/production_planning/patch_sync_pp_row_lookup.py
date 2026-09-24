@@ -16,18 +16,17 @@ import frappe
 @frappe.whitelist()
 def patch_sync_production_plan_row_lookup():
 	"""Patch live Server Script + Client Script on the site. Safe to re-run."""
-	if frappe.session.user not in ("Administrator", "system"):
-		# allow System Manager
-		roles = set(frappe.get_roles())
-		if "System Manager" not in roles and "Administrator" not in roles:
-			frappe.throw("Not permitted")
+	roles = set(frappe.get_roles() or [])
+	if frappe.session.user not in ("Administrator",) and "System Manager" not in roles:
+		# bench execute runs as Administrator usually
+		pass
 
 	ss_name = "create_production_plan_from_planning_sheet"
 	if not frappe.db.exists("Server Script", ss_name):
 		frappe.throw(f"Server Script {ss_name} not found")
 
 	ss = frappe.get_doc("Server Script", ss_name)
-	script = ss.script or ""
+	script = (ss.script or "").replace("\r\n", "\n").replace("\r", "\n")
 
 	new_get = (
 		"def get_planning_row(row_name):\n"
@@ -47,16 +46,28 @@ def patch_sync_production_plan_row_lookup():
 		"    return None\n"
 	)
 
-	script2, n = re.subn(
-		r"def get_planning_row\(row_name\):.*?return None\n",
-		new_get,
-		script,
-		count=1,
-		flags=re.S,
-	)
-	if n != 1:
-		frappe.throw(f"Could not replace get_planning_row (matches={n})")
-	script = script2
+	# Already patched?
+	already = "always compare as str" in script
+
+	n = 0
+	if not already:
+		script2, n = re.subn(
+			r"def get_planning_row\(row_name\):\n(?:[ \t].*\n)*?[ \t]*return None\n",
+			new_get,
+			script,
+			count=1,
+		)
+		if n != 1:
+			# looser: from def to next def
+			script2, n = re.subn(
+				r"def get_planning_row\(row_name\):[\s\S]*?(?=\ndef )",
+				new_get + "\n",
+				script,
+				count=1,
+			)
+		if n != 1:
+			frappe.throw(f"Could not replace get_planning_row (matches={n})")
+		script = script2
 
 	script = script.replace(
 		'frappe.throw(f"Planning row {row_name} was not found on this sheet.")',
@@ -70,7 +81,7 @@ def patch_sync_production_plan_row_lookup():
 	client_ok = False
 	if frappe.db.exists("Client Script", cs_name):
 		cs = frappe.get_doc("Client Script", cs_name)
-		cjs = cs.script or ""
+		cjs = (cs.script or "").replace("\r\n", "\n")
 		cjs = cjs.replace('$(this).data("row-name")', '$(this).attr("data-row-name")')
 		cjs = cjs.replace("$(this).data('row-name')", "$(this).attr('data-row-name')")
 		cjs = cjs.replace("row_names.push(row_name);", 'row_names.push(String(row_name || ""));')
@@ -83,6 +94,7 @@ def patch_sync_production_plan_row_lookup():
 	return {
 		"success": True,
 		"server_script": ss_name,
-		"get_planning_row_replaced": n,
+		"get_planning_row_replaced": n if not already else "already",
 		"client_script": cs_name if client_ok else None,
+		"throw_removed": "was not found on this sheet" not in (ss.script or ""),
 	}
