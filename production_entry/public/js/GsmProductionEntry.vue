@@ -3130,9 +3130,15 @@ function withLocalPendingQuota(job) {
   const jobRolls = Math.max(savedOnServer, gridCount);
   const pending = Math.max(0, jobRolls - savedOnServer);
   const rollsPerShaft = Math.max(1, cint(job.rolls_per_shaft));
-  const jobShafts = Math.min(cint(job.max_shafts), Math.floor(jobRolls / rollsPerShaft));
-  const remRolls = Math.max(0, cint(job.max_rolls) - jobRolls);
-  const remShafts = Math.max(0, cint(job.max_shafts) - jobShafts);
+  const maxRollsCap = cint(job.max_rolls);
+  const maxShaftsCap = cint(job.max_shafts);
+  const jobShafts =
+    maxShaftsCap > 0
+      ? Math.min(maxShaftsCap, Math.floor(jobRolls / rollsPerShaft))
+      : Math.floor(jobRolls / rollsPerShaft);
+  // max_rolls <= 0 means unlimited (lamination / open jobs) — do not treat as full
+  const remRolls = maxRollsCap <= 0 ? 9999 : Math.max(0, maxRollsCap - jobRolls);
+  const remShafts = maxShaftsCap <= 0 ? 9999 : Math.max(0, maxShaftsCap - jobShafts);
   const currentShaftRolls = jobRolls % rollsPerShaft;
   const currentShaftRemainingRolls =
     remRolls > 0 && currentShaftRolls ? Math.max(0, rollsPerShaft - currentShaftRolls) : 0;
@@ -3143,18 +3149,20 @@ function withLocalPendingQuota(job) {
       gridBundleRollCountForJob(job.pp_id, job.job_id, seg.width_inch);
     const current = Math.max(savedAtWidth, gridAtWidth);
     const max = cint(seg.max);
+    const segOpen = max <= 0 || current < max;
     return {
       ...seg,
       api_current: savedAtWidth,
       current,
-      can_add: current < max && remRolls > 0 && !job.wo_terminal,
+      can_add: segOpen && (maxRollsCap <= 0 || remRolls > 0) && !job.wo_terminal,
     };
   });
   // Roll limit gates Add Roll (grid rows + saved count). A job is only "Completed"
   // (quota_full) once its rolls are SUBMITTED to the full quota, or the WO is done.
-  const rollLimitReached = remRolls <= 0 || jobShafts >= cint(job.max_shafts);
+  const rollLimitReached =
+    maxRollsCap > 0 && (remRolls <= 0 || (maxShaftsCap > 0 && jobShafts >= maxShaftsCap));
   const submittedRolls = cint(job.submitted_rolls);
-  const submittedComplete = cint(job.max_rolls) > 0 && submittedRolls >= cint(job.max_rolls);
+  const submittedComplete = maxRollsCap > 0 && submittedRolls >= maxRollsCap;
   const quotaFull = !!job.wo_terminal || submittedComplete;
   return {
     ...job,
@@ -3169,7 +3177,7 @@ function withLocalPendingQuota(job) {
     width_segments: widthSegments,
     roll_limit_reached: rollLimitReached,
     quota_full: quotaFull,
-    can_add_roll: !rollLimitReached && jobRolls < cint(job.max_rolls),
+    can_add_roll: !rollLimitReached && (maxRollsCap <= 0 || jobRolls < maxRollsCap),
   };
 }
 
@@ -4509,6 +4517,10 @@ const canAddRow = computed(() => {
     !selectedSessionSprList.value.length
   ) {
     return false;
+  }
+  // Lamination: no fabric shaft roll quota — Add Roll prompts for N lines on SPR
+  if (isLaminationMode.value) {
+    return true;
   }
   return selectedEntries.value.some((entry) => {
     const jid = entry.jobId || entry.job_id;
@@ -6037,16 +6049,17 @@ async function runLaminationTool(kind) {
       frappe.prompt(
         [
           {
-            fieldname: "rolls_per_combination",
+            fieldname: "roll_lines_to_add",
             fieldtype: "Int",
-            label: __("Rolls per combination"),
+            label: __("Roll lines to add"),
             reqd: 1,
             default: 1,
+            description: __("Adds exactly this many new roll lines for the selected job."),
           },
         ],
-        (v) => resolve(cint(v.rolls_per_combination)),
-        __("Lamination output rolls"),
-        __("Add rolls")
+        (v) => resolve(cint(v.roll_lines_to_add)),
+        __("Lamination — add roll lines"),
+        __("Add")
       );
     });
     if (!n || n < 1) {
@@ -6060,7 +6073,7 @@ async function runLaminationTool(kind) {
         args: {
           spr_name: sprName,
           job_id: jobId || undefined,
-          rolls_per_combination: n,
+          exact_roll_lines: n,
         },
       });
       frappe.show_alert({
@@ -9248,8 +9261,84 @@ function guardedSubmitEntry() {
   });
 }
 
+async function addLaminationRollRowsViaSpr() {
+  if (!selectionLocked.value) {
+    frappe.msgprint(__("Confirm and lock your order selection first."));
+    return;
+  }
+  if (!selectedSessionSprList.value.length) {
+    frappe.msgprint(__("Click Create SPRs before adding roll rows."));
+    return;
+  }
+  const target = await resolveLaminationSprTarget();
+  if (!target?.spr_name) {
+    return;
+  }
+  const sprName = target.spr_name;
+  const jobId =
+    selectedEntries.value.find((e) => e.ppId === target.ppId)?.jobId ||
+    selectedEntries.value.find((e) => e.ppId === target.ppId)?.job_id ||
+    "";
+
+  const n = await new Promise((resolve) => {
+    frappe.prompt(
+      [
+        {
+          fieldname: "roll_lines_to_add",
+          fieldtype: "Int",
+          label: __("Roll lines to add"),
+          reqd: 1,
+          default: 1,
+          description: __("Adds exactly this many new roll lines for the selected job."),
+        },
+      ],
+      (v) => resolve(cint(v.roll_lines_to_add)),
+      __("Lamination — add roll lines"),
+      __("Add")
+    );
+  });
+  if (!n || n < 1) {
+    return;
+  }
+
+  frappe.dom.freeze(__("Adding roll lines…"));
+  try {
+    const r = await frappe.call({
+      method:
+        "production_entry.production_planning.unified_production_entry_api.gsm_lamination_add_output_rolls",
+      args: {
+        spr_name: sprName,
+        job_id: jobId || undefined,
+        exact_roll_lines: n,
+      },
+    });
+    const added = cint(r.message?.added || r.message?.roll_lines_added || n);
+    frappe.show_alert({
+      message: __("Added {0} roll line(s) on {1}", [added, sprName]),
+      indicator: "green",
+    });
+    await refreshSessionFromServer({ quiet: true, merge: true });
+    await fetchOrders();
+  } catch (e) {
+    console.error(e);
+    frappe.msgprint(__("Could not add roll lines to Shaft Production Run."));
+  } finally {
+    frappe.dom.unfreeze();
+  }
+}
+
 async function addRollRow() {
   if (addRollInProgress.value) {
+    return;
+  }
+  // Lamination: same as SPR Create Entry — prompt for roll line count, no fabric shaft limit
+  if (isLaminationMode.value) {
+    addRollInProgress.value = true;
+    try {
+      await addLaminationRollRowsViaSpr();
+    } finally {
+      addRollInProgress.value = false;
+    }
     return;
   }
   if (!selectionLocked.value) {
