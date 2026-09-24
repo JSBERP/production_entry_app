@@ -1680,7 +1680,7 @@
               <template v-if="isLaminationMode">
                 <td>{{ line.quality || "—" }}</td>
                 <td>{{ line.color || "—" }}</td>
-                <td>{{ line.gsm || "—" }}</td>
+                <td>{{ confirmLineGsm(line) }}</td>
                 <td>{{ confirmLineWidth(line) }}</td>
               </template>
               <template v-else>
@@ -2924,7 +2924,7 @@ function orderMetaForPp(ppId) {
     // Prefer planning/color-chart row for order-level; board job is per-job fallback.
     quality: row?.quality || boardJob?.quality || "",
     color: row?.color || row?.fabric_colour || boardJob?.color || "",
-    gsm: boardJob?.gsm || row?.gsm || 0,
+    gsm: cint(row?.gsm) || cint(row?.fabric_gsm) || cint(row?.lam_gsm) || cint(boardJob?.gsm) || 0,
     planningLineId: row?.itemName || row?.name || "",
     width_inch: sprFlt(row?.width_inch || row?.width || boardJob?.width_inch || 0),
     lamination_process: row?.lamination_process || boardJob?.lamination_process || "",
@@ -3224,11 +3224,17 @@ function enrichJobCard(job) {
 
 function snapshotFromJob(job) {
   const meta = orderMetaForPp(job.pp_id);
-  const widthInch = sprFlt(job.width_inch || job.width || 0);
+  const widthInch = sprFlt(job.width_inch || job.width || meta.width_inch || 0);
   const widthLabel =
     widthInch > 0
       ? String(widthInch)
       : job.combination_label || meta.combination_label || "";
+  const gsm =
+    cint(job.gsm) ||
+    cint(job.fabric_gsm) ||
+    cint(job.lam_gsm) ||
+    cint(meta.gsm) ||
+    0;
   return {
     key: entryKeyJob(job.pp_id, job.job_id),
     jobId: job.job_id,
@@ -3239,17 +3245,21 @@ function snapshotFromJob(job) {
     partyName: meta.partyName,
     quality: job.quality || meta.quality || "",
     color: job.color || meta.color || "",
-    gsm: job.gsm,
-    combination_label: job.combination_label || widthLabel,
+    gsm,
+    combination_label: isLaminationMode.value
+      ? widthLabel || job.combination_label || ""
+      : job.combination_label || widthLabel,
     width_inch: widthInch || null,
     widthLabel,
     max_shafts: job.max_shafts,
     max_rolls: job.max_rolls,
     is_manual: !!job.is_manual,
+    lamination_process: job.lamination_process || meta.lamination_process || "",
     dayTargetKg: sprFlt(job.job_target_kg) || orderDayStatsForPp(job.pp_id).dayTargetKg,
+    dayRemKg: orderDayStatsForPp(job.pp_id).dayRemKg,
     sourceSnapshot: {
       pp_id: job.pp_id,
-      gsm: job.gsm,
+      gsm,
       meter_roll: job.meter_roll,
       net_weight: job.net_weight,
     },
@@ -3340,6 +3350,15 @@ function confirmLineProgress(entry) {
   if (!entry) {
     return "—";
   }
+  if (isLaminationMode.value) {
+    const stats = orderDayStatsForPp(entry.ppId);
+    const tgt = sprFlt(entry.dayTargetKg || stats.dayTargetKg);
+    const rem = sprFlt(entry.dayRemKg != null ? entry.dayRemKg : stats.dayRemKg);
+    if (tgt > 0 || rem > 0) {
+      return `${formatKg(rem)} Kg rem / ${formatKg(tgt)} Kg`;
+    }
+    return "—";
+  }
   const job = jobBoardJobs.value.find(
     (j) => j.pp_id === entry.ppId && String(j.job_id) === String(entry.jobId || entry.job_id)
   );
@@ -3347,6 +3366,47 @@ function confirmLineProgress(entry) {
     return "—";
   }
   return `${job.job_shafts_produced}/${job.max_shafts} shafts · ${job.job_rolls_produced}/${job.max_rolls} rolls`;
+}
+
+function confirmLineGsm(line) {
+  if (!line) {
+    return "—";
+  }
+  let g = cint(line.gsm) || cint(line.fabric_gsm) || cint(line.lam_gsm) || 0;
+  if (g <= 0 && line.ppId) {
+    g = cint(orderMetaForPp(line.ppId).gsm) || 0;
+  }
+  return g > 0 ? g : "—";
+}
+
+function syntheticLamJobFromEntry(entry) {
+  const meta = orderMetaForPp(entry.ppId);
+  const gsm = cint(entry.gsm) || cint(entry.fabric_gsm) || cint(meta.gsm) || 0;
+  const widthInch = sprFlt(entry.width_inch || entry.width || meta.width_inch || 0);
+  return {
+    pp_id: entry.ppId,
+    job_id: entry.jobId || entry.job_id || "1",
+    gsm,
+    fabric_gsm: cint(entry.fabric_gsm) || gsm,
+    lam_gsm: cint(entry.lam_gsm) || 0,
+    quality: entry.quality || meta.quality || "",
+    color: entry.color || meta.color || "",
+    width_inch: widthInch || null,
+    meter_roll: 0,
+    max_shafts: 0,
+    max_rolls: 0,
+    rem_rolls: 999,
+    job_rolls_produced: 0,
+    job_shafts_produced: 0,
+    width_segments: [],
+    is_manual: false,
+    planning_line_id: entry.lineId || meta.planningLineId || "",
+    itemName: entry.lineId || meta.planningLineId || "",
+    lamination_process: entry.lamination_process || meta.lamination_process || "",
+    job_target_kg: sprFlt(entry.dayTargetKg) || orderDayStatsForPp(entry.ppId).dayTargetKg,
+    selectable: true,
+    wo_terminal: false,
+  };
 }
 
 function confirmLineWidth(line) {
@@ -3879,6 +3939,80 @@ const freezeGsmPrevShift = computed(() => isBoardActionFrozen(gsmBoardAccess.val
 const jobOrderGroups = computed(() => {
   const map = new Map();
   const allowedPpIds = sidebarAllowedPpIds.value;
+
+  // Lamination entry: ONLY FG order cards from the lamination board (104/107).
+  // Do not show fabric shaft/job-board cards (process 100 combinations).
+  if (isLaminationMode.value) {
+    for (const row of ppSubmittedRows.value) {
+      if (!row.pp_id || (allowedPpIds.size && !allowedPpIds.has(row.pp_id))) {
+        continue;
+      }
+      const orderCode = row.order_code || row.party_code || row.pp_id;
+      const key = `${orderCode}::${row.pp_id}`;
+      const dayStats = orderDayStatsForPp(row.pp_id);
+      const widthInch = sprFlt(row.width_inch || row.width || 0);
+      const widthLabel =
+        widthInch > 0 ? String(widthInch) : _cstr(row.combination || "").trim();
+      const gsm =
+        cint(row.gsm) || cint(row.fabric_gsm) || cint(row.lam_gsm) || 0;
+      const lamProc = _cstr(row.lamination_process || "").trim();
+      // Skip any non-lamination / fabric-only chart leftovers
+      if (lamProc && lamProc !== "104" && lamProc !== "107") {
+        continue;
+      }
+      map.set(key, {
+        key,
+        orderCode,
+        partyName: row.customer || "",
+        ppId: row.pp_id,
+        quality: row.quality || "",
+        color: row.color || "",
+        laminationProcess: lamProc,
+        isTrial: false,
+        dayTargetKg: dayStats.dayTargetKg || sprFlt(row.qty) || sprFlt(row.target_kg),
+        dayRemKg:
+          dayStats.dayRemKg ||
+          sprFlt(row.remaining_kg) ||
+          Math.max(0, sprFlt(row.qty || row.target_kg) - sprFlt(row.actual_production_weight_kgs)),
+        jobs: [
+          enrichJobCard({
+            pp_id: row.pp_id,
+            job_id: "1",
+            job_key: `${row.pp_id}::1`,
+            order_code: orderCode,
+            gsm,
+            fabric_gsm: cint(row.fabric_gsm) || gsm,
+            lam_gsm: cint(row.lam_gsm) || 0,
+            quality: row.quality || "",
+            color: row.color || "",
+            combination_label: widthLabel,
+            width_inch: widthInch || null,
+            widthLabel,
+            planning_line_id: row.itemName || row.name || "",
+            itemName: row.itemName || row.name || "",
+            lamination_process: lamProc,
+            max_shafts: 0,
+            max_rolls: 0,
+            job_shafts_produced: 0,
+            job_rolls_produced: 0,
+            rem_shafts: 0,
+            rem_rolls: 0,
+            selectable: true,
+            quota_full: false,
+            job_target_kg:
+              dayStats.dayTargetKg || sprFlt(row.qty) || sprFlt(row.target_kg),
+            job_remaining_kg:
+              dayStats.dayRemKg ||
+              sprFlt(row.remaining_kg) ||
+              Math.max(0, sprFlt(row.qty || row.target_kg) - sprFlt(row.actual_production_weight_kgs)),
+            tooltip: "Lamination FG order — select to create SPR",
+          }),
+        ],
+      });
+    }
+    return [...map.values()].sort((a, b) => a.orderCode.localeCompare(b.orderCode));
+  }
+
   for (const job of jobBoardJobs.value) {
     if (!allowedPpIds.has(job.pp_id)) {
       continue;
@@ -3903,66 +4037,6 @@ const jobOrderGroups = computed(() => {
       });
     }
     map.get(key).jobs.push(enriched);
-  }
-
-  // Lamination: show order cards even before SPR/job board exists
-  if (isLaminationMode.value) {
-    for (const row of ppSubmittedRows.value) {
-      if (!row.pp_id || (allowedPpIds.size && !allowedPpIds.has(row.pp_id))) {
-        continue;
-      }
-      const orderCode = row.order_code || row.party_code || row.pp_id;
-      const key = `${orderCode}::${row.pp_id}`;
-      if (map.has(key) && map.get(key).jobs.length) {
-        const g = map.get(key);
-        g.laminationProcess = g.laminationProcess || row.lamination_process || "";
-        continue;
-      }
-      const dayStats = orderDayStatsForPp(row.pp_id);
-      const widthInch = sprFlt(row.width_inch || row.width || 0);
-      const widthLabel =
-        widthInch > 0
-          ? String(widthInch)
-          : _cstr(row.combination || "").trim();
-      map.set(key, {
-        key,
-        orderCode,
-        partyName: row.customer || "",
-        ppId: row.pp_id,
-        quality: row.quality || "",
-        color: row.color || "",
-        laminationProcess: row.lamination_process || "",
-        isTrial: false,
-        dayTargetKg: dayStats.dayTargetKg || sprFlt(row.qty),
-        dayRemKg: dayStats.dayRemKg || Math.max(0, sprFlt(row.qty) - sprFlt(row.actual_production_weight_kgs)),
-        jobs: [
-          enrichJobCard({
-            pp_id: row.pp_id,
-            job_id: "1",
-            job_key: `${row.pp_id}::1`,
-            order_code: orderCode,
-            gsm: row.gsm || 0,
-            quality: row.quality || "",
-            color: row.color || "",
-            combination_label: widthLabel || row.combination || "",
-            width_inch: widthInch || null,
-            widthLabel,
-            planning_line_id: row.itemName || row.name || "",
-            itemName: row.itemName || row.name || "",
-            lamination_process: row.lamination_process || "",
-            max_shafts: 0,
-            max_rolls: 0,
-            job_shafts_produced: 0,
-            job_rolls_produced: 0,
-            rem_shafts: 0,
-            rem_rolls: 0,
-            selectable: true,
-            quota_full: false,
-            tooltip: "Lamination order — select to create SPR",
-          }),
-        ],
-      });
-    }
   }
 
   return [...map.values()].sort((a, b) => a.orderCode.localeCompare(b.orderCode));
@@ -7428,6 +7502,43 @@ function enrichSelectedEntriesFromBoard() {
   const next = selectedEntries.value.map((entry) => {
     const jid = entry.jobId || entry.job_id;
     if (jid && entry.ppId) {
+      // Lamination: never overwrite FG selection with fabric shaft job-board rows
+      if (isLaminationMode.value) {
+        const meta = orderMetaForPp(entry.ppId);
+        const stats = orderDayStatsForPp(entry.ppId);
+        const nextGsm = cint(entry.gsm) || cint(meta.gsm) || 0;
+        const nextWidth = sprFlt(entry.width_inch) || sprFlt(meta.width_inch) || 0;
+        const nextLine = meta.planningLineId || entry.lineId || "";
+        const nextTgt = sprFlt(entry.dayTargetKg) || stats.dayTargetKg;
+        const nextRem =
+          entry.dayRemKg != null && entry.dayRemKg !== ""
+            ? sprFlt(entry.dayRemKg)
+            : stats.dayRemKg;
+        if (
+          (meta.planningLineId && meta.planningLineId !== entry.lineId) ||
+          !cint(entry.gsm) ||
+          (!sprFlt(entry.width_inch) && nextWidth) ||
+          !sprFlt(entry.dayTargetKg) ||
+          entry.dayRemKg == null ||
+          entry.dayRemKg === ""
+        ) {
+          changed = true;
+          return {
+            ...entry,
+            lineId: nextLine,
+            quality: entry.quality || meta.quality,
+            color: entry.color || meta.color,
+            gsm: nextGsm,
+            fabric_gsm: nextGsm,
+            width_inch: nextWidth || null,
+            widthLabel: entry.widthLabel || (nextWidth ? String(nextWidth) : ""),
+            dayTargetKg: nextTgt,
+            dayRemKg: nextRem,
+            lamination_process: entry.lamination_process || meta.lamination_process || "",
+          };
+        }
+        return entry;
+      }
       const job = jobBoardJobs.value.find((j) => j.pp_id === entry.ppId && String(j.job_id) === String(jid));
       if (job) {
         const snap = snapshotFromJob(job);
@@ -7448,19 +7559,6 @@ function enrichSelectedEntriesFromBoard() {
         ) {
           changed = true;
           return { ...entry, ...snap, key: entry.key || snap.key };
-        }
-      } else if (isLaminationMode.value) {
-        const meta = orderMetaForPp(entry.ppId);
-        if (meta.planningLineId && meta.planningLineId !== entry.lineId) {
-          changed = true;
-          return {
-            ...entry,
-            lineId: meta.planningLineId,
-            quality: entry.quality || meta.quality,
-            color: entry.color || meta.color,
-            width_inch: entry.width_inch || meta.width_inch || null,
-            widthLabel: entry.widthLabel || (meta.width_inch ? String(meta.width_inch) : ""),
-          };
         }
       }
       return entry;
@@ -7502,13 +7600,17 @@ async function fetchLaminationOrdersForDate(overrideDate = null) {
       planned_date: o.planned_date || d,
       quality: o.quality,
       color: o.color,
-      qty: o.target_kg,
-      gsm: o.fabric_gsm || o.lam_gsm,
+      qty: o.target_kg || o.qty || 0,
+      gsm: cint(o.gsm) || cint(o.fabric_gsm) || cint(o.lam_gsm) || 0,
+      fabric_gsm: cint(o.fabric_gsm) || 0,
+      lam_gsm: cint(o.lam_gsm) || 0,
+      bopp_gsm: cint(o.bopp_gsm) || 0,
       combination: o.combination,
       lamination_process: o.lamination_process,
       needs_fabric_input: o.needs_fabric_input,
       needs_bopp_input: o.needs_bopp_input,
-      actual_production_weight_kgs: o.produced_kg,
+      actual_production_weight_kgs: o.produced_kg || o.actual_production_weight_kgs || 0,
+      remaining_kg: o.remaining_kg,
       itemName: o.itemName || o.psi_name || o.name || "",
       name: o.itemName || o.psi_name || o.name || "",
       width_inch: o.width_inch || o.width || 0,
@@ -8932,6 +9034,15 @@ function pickJobAndWidthForRow() {
     const key = entry.key || entryKeyJob(entry.ppId, entry.jobId || entry.job_id);
     addRollJobChoice.value = key;
     const rawJob = jobBoardJobs.value.find((j) => entryKeyJob(j.pp_id, j.job_id) === key);
+    // Lamination: no fabric shaft job board — use locked selection width/GSM
+    if (!rawJob && isLaminationMode.value) {
+      const widthInch = sprFlt(entry.width_inch || entry.width || 0);
+      if (widthInch <= 0) {
+        frappe.msgprint(__("This order has no width. Check Planning Sheet / color chart."));
+        return Promise.resolve(null);
+      }
+      return Promise.resolve({ job: syntheticLamJobFromEntry(entry), widthInch });
+    }
     if (!rawJob) {
       return Promise.resolve(null);
     }
@@ -9058,8 +9169,16 @@ function proceedAddRollWizard() {
     return;
   }
   const key = addRollJobChoice.value;
-  const rawJob = jobBoardJobs.value.find((j) => entryKeyJob(j.pp_id, j.job_id) === key);
+  let rawJob = jobBoardJobs.value.find((j) => entryKeyJob(j.pp_id, j.job_id) === key);
   const widthInch = sprFlt(addRollWidthChoice.value);
+  if (!rawJob && isLaminationMode.value && widthInch > 0) {
+    const entry =
+      selectedEntries.value.find((e) => (e.key || entryKeyJob(e.ppId, e.jobId || e.job_id)) === key) ||
+      selectedEntries.value[0];
+    if (entry) {
+      rawJob = syntheticLamJobFromEntry(entry);
+    }
+  }
   showAddRollWizard.value = false;
   addRollWizardStep.value = 1;
   addRollWizardSkipJobStep.value = false;

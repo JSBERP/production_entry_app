@@ -4285,6 +4285,18 @@ def get_gsm_lamination_order_board(run_date=None, unit=None, lamination_process=
 				widths = _parse_combination_widths_inches(comb) if comb else []
 				if widths:
 					width_inch = flt(widths[0])
+			fabric_gsm = cint(r.get("fabric_gsm") or r.get("gsm") or 0)
+			lam_gsm = cint(r.get("lam_gsm") or r.get("lamination_gsm") or r.get("custom_lam_gsm") or 0)
+			bopp_gsm = cint(r.get("bopp_gsm") or r.get("custom_bopp_gsm") or 0)
+			# Sticker / entry GSM: prefer fabric, then lam, then PT.gsm if Planning Table known
+			gsm = fabric_gsm or lam_gsm or cint(r.get("total_gsm") or 0)
+			if gsm <= 0 and psi_name and frappe.db.exists("Planning Table", psi_name):
+				try:
+					gsm = cint(frappe.db.get_value("Planning Table", psi_name, "gsm") or 0)
+					if fabric_gsm <= 0 and gsm > 0:
+						fabric_gsm = gsm
+				except Exception:
+					pass
 			orders.append(
 				{
 					"key": key,
@@ -4301,10 +4313,13 @@ def get_gsm_lamination_order_board(run_date=None, unit=None, lamination_process=
 					"target_kg": target_kg,
 					"produced_kg": produced_kg,
 					"remaining_kg": max(0.0, target_kg - produced_kg),
+					"qty": target_kg,
+					"actual_production_weight_kgs": produced_kg,
 					"combination": _cstr(r.get("combination") or r.get("combination_label") or ""),
-					"fabric_gsm": cint(r.get("fabric_gsm") or r.get("gsm") or 0),
-					"lam_gsm": cint(r.get("lam_gsm") or r.get("lamination_gsm") or r.get("custom_lam_gsm") or 0),
-					"bopp_gsm": cint(r.get("bopp_gsm") or r.get("custom_bopp_gsm") or 0),
+					"gsm": gsm,
+					"fabric_gsm": fabric_gsm,
+					"lam_gsm": lam_gsm,
+					"bopp_gsm": bopp_gsm,
 					"pp_docstatus": cint(r.get("pp_docstatus") or 1),
 					"planned_date": str(r.get("planned_date") or r.get("date") or run_date),
 					# Planning Table row name — required for Create SPR
