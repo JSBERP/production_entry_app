@@ -139,11 +139,16 @@
                 <span v-if="job.quality" class="gpe-spec-chip gpe-spec-quality">{{ job.quality }}</span>
                 <span v-if="job.color" class="gpe-spec-chip gpe-spec-color">{{ job.color }}</span>
               </div>
-              <div class="gpe-job-combination">{{ job.combination_label || "—" }}</div>
+              <div v-if="!isLaminationMode" class="gpe-job-combination">{{ job.combination_label || "—" }}</div>
+              <div v-else class="gpe-job-combination">
+                <template v-if="job.width_inch || job.widthLabel">{{ job.width_inch || job.widthLabel }}"</template>
+                <template v-else-if="job.combination_label">{{ job.combination_label }}</template>
+                <template v-else>—</template>
+              </div>
               <div v-if="isLaminationMode && (job.lamination_process || grp.laminationProcess)" class="gpe-job-target">
                 <span class="gpe-spec-chip">Process {{ job.lamination_process || grp.laminationProcess }}</span>
-                <span v-if="(job.lamination_process || grp.laminationProcess) === '107'" class="gpe-spec-chip">Fabric + BOPP</span>
-                <span v-else class="gpe-spec-chip">Fabric input</span>
+                <span v-if="(job.lamination_process || grp.laminationProcess) === '107'" class="gpe-spec-chip">Lamination + BOPP</span>
+                <span v-else class="gpe-spec-chip">Lamination input</span>
               </div>
               <div v-if="job.job_target_kg > 0" class="gpe-job-target">
                 <span class="gpe-day-target">Job Tgt {{ formatKg(job.job_target_kg) }} Kg</span>
@@ -164,7 +169,7 @@
                 </div>
               </div>
               <div v-else class="gpe-job-remaining">
-                Order remaining — produce by rolls per combination after inputs.
+                Order remaining — produce by rolls after inputs.
               </div>
               <div class="gpe-meter-context">{{ shift }} · {{ formatPlannedDate(runDate) }}</div>
               <div v-if="cint(job.today_rolls) > 0" class="gpe-shift-breakdown">
@@ -279,7 +284,12 @@
                     <span v-if="job.quality" class="gpe-spec-chip gpe-spec-quality">{{ job.quality }}</span>
                     <span v-if="job.color" class="gpe-spec-chip gpe-spec-color">{{ job.color }}</span>
                   </div>
-                  <div class="gpe-job-combination">{{ job.combination_label || "—" }}</div>
+                  <div v-if="!isLaminationMode" class="gpe-job-combination">{{ job.combination_label || "—" }}</div>
+                  <div v-else class="gpe-job-combination">
+                    <template v-if="job.width_inch || job.widthLabel">{{ job.width_inch || job.widthLabel }}"</template>
+                    <template v-else-if="job.combination_label">{{ job.combination_label }}</template>
+                    <template v-else>—</template>
+                  </div>
                   <div v-if="job.job_target_kg > 0" class="gpe-job-target">
                     <span class="gpe-day-target">Job Tgt {{ formatKg(job.job_target_kg) }} Kg</span>
                     <span class="gpe-day-rem">Rem {{ formatKg(job.job_remaining_kg) }} Kg</span>
@@ -1656,7 +1666,10 @@
         <p>Lock these jobs for roll entry? You can unlock later.</p>
         <table class="gpe-confirm-grid">
           <thead>
-            <tr>
+            <tr v-if="isLaminationMode">
+              <th>Order</th><th>Job</th><th>Quality</th><th>Color</th><th>GSM</th><th>Width</th><th>Progress</th>
+            </tr>
+            <tr v-else>
               <th>Order</th><th>Job</th><th>GSM</th><th>Combination</th><th>Progress</th>
             </tr>
           </thead>
@@ -1664,8 +1677,16 @@
             <tr v-for="line in confirmLines" :key="line.key">
               <td>{{ line.orderCode }}</td>
               <td>{{ line.jobId || line.job_id }}</td>
-              <td>{{ line.gsm }}</td>
-              <td>{{ line.combination_label || line.widthLabel }}</td>
+              <template v-if="isLaminationMode">
+                <td>{{ line.quality || "—" }}</td>
+                <td>{{ line.color || "—" }}</td>
+                <td>{{ line.gsm || "—" }}</td>
+                <td>{{ confirmLineWidth(line) }}</td>
+              </template>
+              <template v-else>
+                <td>{{ line.gsm }}</td>
+                <td>{{ line.combination_label || line.widthLabel }}</td>
+              </template>
               <td>{{ confirmLineProgress(line) }}</td>
             </tr>
           </tbody>
@@ -2160,16 +2181,17 @@ function isGsmSessionDeadError(err) {
     return true;
   }
   const text = gsmErrorText(err);
+  // Do NOT treat bare "not whitelisted" / "method not allowed" as session death —
+  // those can be API/permission errors while Desk is still logged in (false Login expired).
   return (
-    text.includes("not whitelisted") ||
     text.includes("login to access") ||
     text.includes("not permitted to access this resource") ||
     text.includes("please log in to continue") ||
-    text.includes("method not allowed") ||
+    text.includes("session expired") ||
+    text.includes("authenticationerror") ||
     text.includes("csrftoken") ||
     text.includes("csrf token") ||
-    text.includes("session expired") ||
-    text.includes("authenticationerror")
+    (text.includes("not whitelisted") && text.includes("login to access"))
   );
 }
 
@@ -2904,6 +2926,7 @@ function orderMetaForPp(ppId) {
     color: row?.color || row?.fabric_colour || boardJob?.color || "",
     gsm: boardJob?.gsm || row?.gsm || 0,
     planningLineId: row?.itemName || row?.name || "",
+    width_inch: sprFlt(row?.width_inch || row?.width || boardJob?.width_inch || 0),
     lamination_process: row?.lamination_process || boardJob?.lamination_process || "",
   };
 }
@@ -3201,20 +3224,25 @@ function enrichJobCard(job) {
 
 function snapshotFromJob(job) {
   const meta = orderMetaForPp(job.pp_id);
+  const widthInch = sprFlt(job.width_inch || job.width || 0);
+  const widthLabel =
+    widthInch > 0
+      ? String(widthInch)
+      : job.combination_label || meta.combination_label || "";
   return {
     key: entryKeyJob(job.pp_id, job.job_id),
     jobId: job.job_id,
-    lineId: meta.planningLineId,
+    lineId: meta.planningLineId || job.planning_line_id || job.itemName || "",
     plannedDate: filterDate.value,
     ppId: job.pp_id,
     orderCode: meta.orderCode,
     partyName: meta.partyName,
-    quality: meta.quality,
-    color: meta.color,
+    quality: job.quality || meta.quality || "",
+    color: job.color || meta.color || "",
     gsm: job.gsm,
-    combination_label: job.combination_label,
-    width_inch: null,
-    widthLabel: job.combination_label || "",
+    combination_label: job.combination_label || widthLabel,
+    width_inch: widthInch || null,
+    widthLabel,
     max_shafts: job.max_shafts,
     max_rolls: job.max_rolls,
     is_manual: !!job.is_manual,
@@ -3309,6 +3337,9 @@ function defaultAddRollJobKey(entries) {
 }
 
 function confirmLineProgress(entry) {
+  if (!entry) {
+    return "—";
+  }
   const job = jobBoardJobs.value.find(
     (j) => j.pp_id === entry.ppId && String(j.job_id) === String(entry.jobId || entry.job_id)
   );
@@ -3316,6 +3347,18 @@ function confirmLineProgress(entry) {
     return "—";
   }
   return `${job.job_shafts_produced}/${job.max_shafts} shafts · ${job.job_rolls_produced}/${job.max_rolls} rolls`;
+}
+
+function confirmLineWidth(line) {
+  if (!line) {
+    return "—";
+  }
+  const w = sprFlt(line.width_inch || line.width || 0);
+  if (w > 0) {
+    return `${w}`;
+  }
+  const label = _cstr(line.widthLabel || line.combination_label || "").trim();
+  return label || "—";
 }
 
 function plural(n, one, many) {
@@ -3876,6 +3919,11 @@ const jobOrderGroups = computed(() => {
         continue;
       }
       const dayStats = orderDayStatsForPp(row.pp_id);
+      const widthInch = sprFlt(row.width_inch || row.width || 0);
+      const widthLabel =
+        widthInch > 0
+          ? String(widthInch)
+          : _cstr(row.combination || "").trim();
       map.set(key, {
         key,
         orderCode,
@@ -3896,7 +3944,11 @@ const jobOrderGroups = computed(() => {
             gsm: row.gsm || 0,
             quality: row.quality || "",
             color: row.color || "",
-            combination_label: row.combination || "",
+            combination_label: widthLabel || row.combination || "",
+            width_inch: widthInch || null,
+            widthLabel,
+            planning_line_id: row.itemName || row.name || "",
+            itemName: row.itemName || row.name || "",
             lamination_process: row.lamination_process || "",
             max_shafts: 0,
             max_rolls: 0,
@@ -6194,6 +6246,8 @@ function buildSessionEntries() {
     job_id: entry.jobId || entry.job_id,
     jobId: entry.jobId || entry.job_id,
     lineId: entry.lineId,
+    itemName: entry.lineId,
+    planning_table_row: entry.lineId,
     orderCode: entry.orderCode,
     quality: entry.quality,
     color: entry.color,
@@ -6502,6 +6556,26 @@ async function createSprs(options = {}) {
   const ppIds = Array.isArray(options?.ppIds) ? options.ppIds.filter(Boolean) : [];
   if (!options?.silent && !ppIds.length && !canCreateSprs.value) {
     return false;
+  }
+  // Ensure Planning Table ids are filled before API call (lamination autosave may lack them)
+  try {
+    enrichSelectedEntriesFromBoard();
+  } catch (e) {
+    /* ignore */
+  }
+  for (let i = 0; i < selectedEntries.value.length; i++) {
+    const e = selectedEntries.value[i];
+    if (!e?.ppId) continue;
+    const bad =
+      !e.lineId ||
+      String(e.lineId).startsWith("job-") ||
+      e.lineId === "1" ||
+      e.lineId === "gsm-job";
+    if (!bad) continue;
+    const meta = orderMetaForPp(e.ppId);
+    if (meta.planningLineId) {
+      selectedEntries.value[i] = { ...e, lineId: meta.planningLineId };
+    }
   }
   const allEntries = buildSessionEntries();
   let entries = allEntries;
@@ -7357,14 +7431,36 @@ function enrichSelectedEntriesFromBoard() {
       const job = jobBoardJobs.value.find((j) => j.pp_id === entry.ppId && String(j.job_id) === String(jid));
       if (job) {
         const snap = snapshotFromJob(job);
+        const needsLine =
+          !entry.lineId ||
+          String(entry.lineId).startsWith("job-") ||
+          entry.lineId === "1" ||
+          entry.lineId === "gsm-job";
         if (
+          needsLine ||
           entry.key !== snap.key ||
           entry.combination_label !== snap.combination_label ||
+          entry.quality !== snap.quality ||
+          entry.color !== snap.color ||
           !entry.gsm ||
-          entry.orderCode === entry.ppId
+          entry.orderCode === entry.ppId ||
+          sprFlt(entry.width_inch) !== sprFlt(snap.width_inch)
         ) {
           changed = true;
           return { ...entry, ...snap, key: entry.key || snap.key };
+        }
+      } else if (isLaminationMode.value) {
+        const meta = orderMetaForPp(entry.ppId);
+        if (meta.planningLineId && meta.planningLineId !== entry.lineId) {
+          changed = true;
+          return {
+            ...entry,
+            lineId: meta.planningLineId,
+            quality: entry.quality || meta.quality,
+            color: entry.color || meta.color,
+            width_inch: entry.width_inch || meta.width_inch || null,
+            widthLabel: entry.widthLabel || (meta.width_inch ? String(meta.width_inch) : ""),
+          };
         }
       }
       return entry;
@@ -7413,6 +7509,10 @@ async function fetchLaminationOrdersForDate(overrideDate = null) {
       needs_fabric_input: o.needs_fabric_input,
       needs_bopp_input: o.needs_bopp_input,
       actual_production_weight_kgs: o.produced_kg,
+      itemName: o.itemName || o.psi_name || o.name || "",
+      name: o.itemName || o.psi_name || o.name || "",
+      width_inch: o.width_inch || o.width || 0,
+      width: o.width_inch || o.width || 0,
     })
   );
 }

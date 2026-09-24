@@ -4000,6 +4000,90 @@ def get_gsm_pp_job_board(pp_ids=None, run_date=None, shift=None, unit=None, spr_
 	}
 
 
+def _gsm_resolve_planning_table_names_for_pp(pp_id: str) -> list[str]:
+	"""
+	Find Planning Table row names for a Production Plan when the client sent
+	no valid lineId (common for lamination order-board selections).
+
+	Prefer lamination FG rows (104/107); otherwise any PT rows linked to the PP.
+	"""
+	pp_id = _cstr(pp_id).strip()
+	if not pp_id or not frappe.db.exists("Production Plan", pp_id):
+		return []
+
+	candidates: list[str] = []
+
+	# PT rows that store PP link on common fields
+	pp_fields = []
+	for fn in (
+		"production_plan",
+		"custom_production_plan",
+		"mr_production_plan",
+		"custom_pp_name",
+	):
+		if frappe.db.has_column("Planning Table", fn):
+			pp_fields.append(fn)
+
+	rows = []
+	if pp_fields:
+		or_filters = [[fn, "=", pp_id] for fn in pp_fields]
+		try:
+			rows = frappe.get_all(
+				"Planning Table",
+				or_filters=or_filters,
+				fields=["name", "item_code"],
+				limit=50,
+			)
+		except Exception:
+			rows = []
+
+	# Also via Production Plan Item → sales_order_item linkage when present
+	if not rows and frappe.db.has_column("Planning Table", "sales_order_item"):
+		soi_list = frappe.get_all(
+			"Production Plan Item",
+			filters={"parent": pp_id},
+			pluck="sales_order_item",
+		)
+		soi_list = [x for x in (soi_list or []) if x]
+		if soi_list:
+			rows = frappe.get_all(
+				"Planning Table",
+				filters={"sales_order_item": ["in", soi_list]},
+				fields=["name", "item_code"],
+				limit=50,
+			)
+
+	lam_rows = []
+	other_rows = []
+	for r in rows or []:
+		nm = _cstr(r.get("name")).strip()
+		if not nm:
+			continue
+		ic = _cstr(r.get("item_code")).strip()
+		try:
+			from production_entry.production_planning.scheduler_api import (
+				_is_lamination_parent_process,
+			)
+
+			is_lam = _is_lamination_parent_process(ic)
+		except Exception:
+			is_lam = ic.startswith("104") or ic.startswith("107") or "-104" in ic or "-107" in ic
+		if is_lam:
+			lam_rows.append(nm)
+		else:
+			other_rows.append(nm)
+
+	candidates = lam_rows or other_rows
+	# de-dupe preserve order
+	seen = set()
+	out = []
+	for n in candidates:
+		if n not in seen:
+			seen.add(n)
+			out.append(n)
+	return out
+
+
 @frappe.whitelist(methods=["GET", "POST"])
 def create_gsm_sprs_for_session(
 	run_date=None,
@@ -4025,21 +4109,50 @@ def create_gsm_sprs_for_session(
 			entry.get("lineId")
 			or entry.get("planning_table_row")
 			or entry.get("planning_line_id")
+			or entry.get("itemName")
+			or entry.get("psi_name")
 			or entry.get("id")
 		).strip()
 		if not pp_id:
 			continue
-		if not line_id:
-			line_id = _cstr(entry.get("job_id") or entry.get("jobId") or "gsm-job")
+		# Reject synthetic job placeholders (job-1 / 1 / gsm-job) — resolve real PT rows below
+		if line_id and (
+			line_id.startswith("job-")
+			or line_id in ("gsm-job", "1")
+			or not frappe.db.exists("Planning Table", line_id)
+		):
+			line_id = ""
 		pp_groups.setdefault(pp_id, [])
-		if line_id not in pp_groups[pp_id]:
+		if line_id and line_id not in pp_groups[pp_id]:
 			pp_groups[pp_id].append(line_id)
 
 	if not pp_groups:
 		frappe.throw(_("No valid Production Plan rows in selection"))
 
+	# Fill missing Planning Table names from the PP (lamination 104/107 FG rows)
+	for pp_id, psi_names in list(pp_groups.items()):
+		if psi_names:
+			continue
+		resolved = _gsm_resolve_planning_table_names_for_pp(pp_id)
+		if resolved:
+			pp_groups[pp_id] = resolved
+		else:
+			frappe.log_error(
+				f"No Planning Table rows for PP {pp_id}",
+				"create_gsm_sprs_for_session",
+			)
+
 	sprs_out = []
 	for pp_id, psi_names in pp_groups.items():
+		if not psi_names:
+			sprs_out.append(
+				{
+					"pp_id": pp_id,
+					"status": "error",
+					"message": _("No valid Planning Sheet Items found"),
+				}
+			)
+			continue
 		result = ensure_draft_spr_for_pp(
 			pp_id,
 			psi_names,
@@ -4153,6 +4266,25 @@ def get_gsm_lamination_order_board(run_date=None, unit=None, lamination_process=
 				seen.add(pp_id)
 			target_kg = flt(r.get("qty") or r.get("planned_qty") or r.get("required_qty") or 0)
 			produced_kg = flt(r.get("spr_kg") or r.get("achieved_kg") or r.get("actual_production_weight_kgs") or 0)
+			psi_name = _cstr(
+				r.get("itemName") or r.get("item_name") or r.get("psi_name") or r.get("name") or ""
+			).strip()
+			# Prefer Planning Table row id only (not Item description names)
+			if psi_name and not frappe.db.exists("Planning Table", psi_name):
+				psi_name = _cstr(r.get("itemName") or r.get("psi_name") or "").strip()
+				if psi_name and not frappe.db.exists("Planning Table", psi_name):
+					psi_name = ""
+			width_inch = flt(
+				r.get("width_inch")
+				or r.get("pt_width_inch")
+				or r.get("width")
+				or 0
+			)
+			if width_inch <= 0:
+				comb = _cstr(r.get("combination") or r.get("combination_label") or "")
+				widths = _parse_combination_widths_inches(comb) if comb else []
+				if widths:
+					width_inch = flt(widths[0])
 			orders.append(
 				{
 					"key": key,
@@ -4171,10 +4303,16 @@ def get_gsm_lamination_order_board(run_date=None, unit=None, lamination_process=
 					"remaining_kg": max(0.0, target_kg - produced_kg),
 					"combination": _cstr(r.get("combination") or r.get("combination_label") or ""),
 					"fabric_gsm": cint(r.get("fabric_gsm") or r.get("gsm") or 0),
-					"lam_gsm": cint(r.get("lam_gsm") or r.get("custom_lam_gsm") or 0),
+					"lam_gsm": cint(r.get("lam_gsm") or r.get("lamination_gsm") or r.get("custom_lam_gsm") or 0),
 					"bopp_gsm": cint(r.get("bopp_gsm") or r.get("custom_bopp_gsm") or 0),
 					"pp_docstatus": cint(r.get("pp_docstatus") or 1),
 					"planned_date": str(r.get("planned_date") or r.get("date") or run_date),
+					# Planning Table row name — required for Create SPR
+					"itemName": psi_name,
+					"name": psi_name,
+					"psi_name": psi_name,
+					"width_inch": width_inch,
+					"width": width_inch,
 				}
 			)
 	return {"status": "ok", "run_date": str(run_date), "unit": unit, "orders": orders}
