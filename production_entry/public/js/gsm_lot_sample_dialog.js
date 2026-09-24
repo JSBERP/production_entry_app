@@ -287,6 +287,21 @@ export async function openGsmLotSampleDialog(opts = {}) {
 				row.gsm = "";
 				const opt = _orderOpt(options, row.order_code);
 				row.fabric_type = (opt && opt.fabric_type) || "";
+				row.pp_id = (opt && opt.pp_id) || "";
+				row.spr_name = (opt && opt.spr_name) || "";
+				// Auto-pick when only one quality / colour / gsm for this order
+				const qs = _qualities(opt);
+				if (qs.length === 1) {
+					row.quality = qs[0].quality || "";
+					const cols = _colours(opt, row.quality);
+					if (cols.length === 1) {
+						row.colour = cols[0].colour || "";
+						const gsms = _gsms(opt, row.quality, row.colour);
+						if (gsms.length === 1) {
+							row.gsm = gsms[0];
+						}
+					}
+				}
 				rows[idx] = row;
 				render();
 			});
@@ -295,6 +310,14 @@ export async function openGsmLotSampleDialog(opts = {}) {
 				const row = rows[idx] || {};
 				row.colour = "";
 				row.gsm = "";
+				const cols = _colours(_orderOpt(options, row.order_code), row.quality);
+				if (cols.length === 1) {
+					row.colour = cols[0].colour || "";
+					const gsms = _gsms(_orderOpt(options, row.order_code), row.quality, row.colour);
+					if (gsms.length === 1) {
+						row.gsm = gsms[0];
+					}
+				}
 				rows[idx] = row;
 				render();
 			});

@@ -231,19 +231,122 @@ def _combo_from_jobs(jobs: list[dict], pp_id: str, spr_name: str = "") -> dict:
 
 	order_code = ""
 	qualities: dict[str, dict] = {}
+
+	def _add(quality: str, colour: str, gsm: int = 0):
+		quality = _cstr(quality)
+		colour = _cstr(colour)
+		if not quality:
+			return
+		qnode = qualities.setdefault(quality, {"quality": quality, "colours": {}})
+		cnode = qnode["colours"].setdefault(colour or "—", {"colour": colour, "gsms": []})
+		g = cint(gsm or 0)
+		if g > 0 and g not in cnode["gsms"]:
+			cnode["gsms"].append(g)
+
 	for job in jobs or []:
 		oc = _cstr(job.get("order_code") or "")
 		if oc and not order_code:
 			order_code = oc
-		quality = _cstr(job.get("quality") or "")
-		colour = _cstr(job.get("color") or job.get("colour") or "")
-		gsm = cint(job.get("gsm") or 0)
-		if not quality:
-			continue
-		qnode = qualities.setdefault(quality, {"quality": quality, "colours": {}})
-		cnode = qnode["colours"].setdefault(colour or "—", {"colour": colour, "gsms": []})
-		if gsm > 0 and gsm not in cnode["gsms"]:
-			cnode["gsms"].append(gsm)
+		_add(
+			job.get("quality") or "",
+			job.get("color") or job.get("colour") or "",
+			job.get("gsm") or job.get("fabric_gsm") or job.get("lam_gsm") or 0,
+		)
+
+	# Lamination / FG: job board may have no fabric shaft jobs — fall back to PP + Planning Table + SPR
+	if not qualities:
+		pp_id = _cstr(pp_id)
+		if pp_id and frappe.db.exists("Production Plan", pp_id):
+			pp_fields = []
+			for f in (
+				"custom_quality",
+				"custom_color",
+				"custom_colour",
+				"quality",
+				"color",
+				"colour",
+			):
+				if frappe.db.has_column("Production Plan", f):
+					pp_fields.append(f)
+			if pp_fields:
+				pp_row = frappe.db.get_value("Production Plan", pp_id, pp_fields, as_dict=True) or {}
+				_add(
+					pp_row.get("custom_quality") or pp_row.get("quality") or "",
+					pp_row.get("custom_color")
+					or pp_row.get("custom_colour")
+					or pp_row.get("color")
+					or pp_row.get("colour")
+					or "",
+					0,
+				)
+			# Planning Table rows for this PP (quality may live in custom_quality)
+			pt_filters = []
+			for f in ("order_sheet", "custom_order_sheet", "production_plan", "custom_production_plan"):
+				if frappe.db.has_column("Planning Table", f):
+					pt_filters.append([f, "=", pp_id])
+			if pt_filters:
+				or_filters = pt_filters if len(pt_filters) > 1 else None
+				filters = pt_filters[0] if len(pt_filters) == 1 else None
+				pt_fields = ["name"]
+				for f in (
+					"quality",
+					"custom_quality",
+					"color",
+					"colour",
+					"gsm",
+					"fabric_gsm",
+					"lam_gsm",
+					"item_code",
+					"production_item",
+				):
+					if frappe.db.has_column("Planning Table", f):
+						pt_fields.append(f)
+				try:
+					pts = frappe.get_all(
+						"Planning Table",
+						filters=filters,
+						or_filters=or_filters,
+						fields=pt_fields,
+						limit_page_length=50,
+					) or []
+				except Exception:
+					pts = []
+				for pt in pts:
+					q = _cstr(pt.get("quality") or pt.get("custom_quality") or "")
+					c = _cstr(pt.get("color") or pt.get("colour") or "")
+					g = cint(pt.get("gsm") or pt.get("fabric_gsm") or pt.get("lam_gsm") or 0)
+					if not q:
+						ic = _cstr(pt.get("item_code") or pt.get("production_item") or "")
+						if ic:
+							try:
+								from production_entry.production_planning.scheduler_api import (
+									resolve_quality_color_gsm_from_item_code,
+								)
+
+								rq, rc, rg = resolve_quality_color_gsm_from_item_code(ic)
+								q = q or _cstr(rq)
+								c = c or _cstr(rc)
+								g = g or cint(rg or 0)
+							except Exception:
+								pass
+					_add(q, c, g)
+
+		spr_name = _cstr(spr_name)
+		if spr_name and frappe.db.exists("Shaft Production Run", spr_name):
+			spr = frappe.get_doc("Shaft Production Run", spr_name)
+			for it in spr.get("items") or []:
+				_add(
+					getattr(it, "quality", None) or "",
+					getattr(it, "color", None) or getattr(it, "colour", None) or "",
+					getattr(it, "gsm", None) or getattr(it, "custom_fabric_gsm", None) or 0,
+				)
+			for sj in spr.get("shaft_jobs") or []:
+				_add(
+					getattr(sj, "quality", None) or "",
+					getattr(sj, "color", None) or getattr(sj, "colour", None) or "",
+					getattr(sj, "gsm", None) or 0,
+				)
+
 	if not order_code:
 		order_code = _gsm_order_code_for_pp(pp_id)
 	qualities_out = []
@@ -311,7 +414,11 @@ def get_lot_sample_order_options(
 	spr_names=None,
 	pp_ids=None,
 ):
-	from production_entry.production_planning.unified_production_entry_api import get_gsm_pp_job_board
+	from production_entry.production_planning.unified_production_entry_api import (
+		_gsm_draft_sprs_for_session,
+		get_gsm_lamination_order_board,
+		get_gsm_pp_job_board,
+	)
 
 	pp_ids = _session_pp_ids(
 		run_date=run_date,
@@ -328,11 +435,32 @@ def get_lot_sample_order_options(
 		pp_ids=pp_ids, run_date=run_date, shift=shift, unit=custom_unit
 	) or {}
 	by_pp = board.get("by_pp") or {}
-	spr_by_pp = {}
-	from production_entry.production_planning.unified_production_entry_api import (
-		_gsm_draft_sprs_for_session,
-	)
+	# Lamination FG board carries quality/color/gsm on the order row (no fabric shaft jobs)
+	unit_l = _cstr(custom_unit).lower()
+	if "lam" in unit_l:
+		try:
+			lam = get_gsm_lamination_order_board(run_date=run_date, unit=custom_unit) or {}
+		except Exception:
+			lam = {}
+		pp_set = set(pp_ids)
+		for order in lam.get("orders") or []:
+			pp = _cstr(order.get("pp_id") or "")
+			if not pp or (pp_set and pp not in pp_set):
+				continue
+			jobs = by_pp.setdefault(pp, [])
+			jobs.append(
+				{
+					"order_code": order.get("order_code") or "",
+					"quality": order.get("quality") or "",
+					"color": order.get("color") or order.get("colour") or "",
+					"gsm": order.get("gsm")
+					or order.get("fabric_gsm")
+					or order.get("lam_gsm")
+					or 0,
+				}
+			)
 
+	spr_by_pp = {}
 	for spr in _gsm_draft_sprs_for_session(run_date, shift, custom_unit):
 		pp = _cstr(spr.get("pp_id"))
 		if pp and spr.get("spr_name"):
