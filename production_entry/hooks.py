@@ -151,6 +151,7 @@ extend_bootinfo = "production_entry.production_planning.board_access.extend_boot
 override_doctype_class = {
 	"Stock Entry": "production_entry.stock_entry_override.SPRStockEntryOverride",
 	"Work Order": "production_entry.work_order_override.SPRWorkOrderOverride",
+	"Sales Order": "production_entry.production_planning.sales_order_quotation_limit.JSBSalesOrder",
 }
 
 # Document Events
@@ -164,6 +165,8 @@ _DESIGN_MASTER_HOOKS = {
 
 doc_events = {
     "Sales Order": {
+        "validate": "production_entry.production_planning.sales_order_quotation_limit.sales_order_validate",
+        "before_submit": "production_entry.production_planning.sales_order_quotation_limit.sales_order_before_submit",
         "on_submit": "production_entry.production_planning.scheduler_api.auto_create_planning_sheet",
     },
     "Planning sheet": {
