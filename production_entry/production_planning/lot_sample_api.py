@@ -255,97 +255,130 @@ def _combo_from_jobs(jobs: list[dict], pp_id: str, spr_name: str = "") -> dict:
 
 	# Lamination / FG: job board may have no fabric shaft jobs — fall back to PP + Planning Table + SPR
 	if not qualities:
-		pp_id = _cstr(pp_id)
-		if pp_id and frappe.db.exists("Production Plan", pp_id):
-			pp_fields = []
-			for f in (
-				"custom_quality",
-				"custom_color",
-				"custom_colour",
-				"quality",
-				"color",
-				"colour",
-			):
-				if frappe.db.has_column("Production Plan", f):
-					pp_fields.append(f)
-			if pp_fields:
-				pp_row = frappe.db.get_value("Production Plan", pp_id, pp_fields, as_dict=True) or {}
-				_add(
-					pp_row.get("custom_quality") or pp_row.get("quality") or "",
-					pp_row.get("custom_color")
-					or pp_row.get("custom_colour")
-					or pp_row.get("color")
-					or pp_row.get("colour")
-					or "",
-					0,
-				)
-			# Planning Table rows for this PP (quality may live in custom_quality)
-			pt_filters = []
-			for f in ("order_sheet", "custom_order_sheet", "production_plan", "custom_production_plan"):
-				if frappe.db.has_column("Planning Table", f):
-					pt_filters.append([f, "=", pp_id])
-			if pt_filters:
-				or_filters = pt_filters if len(pt_filters) > 1 else None
-				filters = pt_filters[0] if len(pt_filters) == 1 else None
-				pt_fields = ["name"]
+		try:
+			pp_id = _cstr(pp_id)
+			if pp_id and frappe.db.exists("Production Plan", pp_id):
+				pp_fields = []
 				for f in (
-					"quality",
 					"custom_quality",
+					"custom_color",
+					"custom_colour",
+					"quality",
 					"color",
 					"colour",
-					"gsm",
-					"fabric_gsm",
-					"lam_gsm",
-					"item_code",
-					"production_item",
 				):
+					if frappe.db.has_column("Production Plan", f):
+						pp_fields.append(f)
+				if pp_fields:
+					pp_row = frappe.db.get_value("Production Plan", pp_id, pp_fields, as_dict=True) or {}
+					_add(
+						pp_row.get("custom_quality") or pp_row.get("quality") or "",
+						pp_row.get("custom_color")
+						or pp_row.get("custom_colour")
+						or pp_row.get("color")
+						or pp_row.get("colour")
+						or "",
+						0,
+					)
+				# Planning Table rows for this PP (quality may live in custom_quality)
+				# Always pass or_filters as list-of-lists — a flat ["field","=",val] is invalid.
+				pt_link_filters = []
+				for f in ("order_sheet", "custom_order_sheet", "production_plan", "custom_production_plan"):
 					if frappe.db.has_column("Planning Table", f):
-						pt_fields.append(f)
-				try:
-					pts = frappe.get_all(
-						"Planning Table",
-						filters=filters,
-						or_filters=or_filters,
-						fields=pt_fields,
-						limit_page_length=50,
-					) or []
-				except Exception:
+						pt_link_filters.append([f, "=", pp_id])
+				if pt_link_filters:
+					pt_fields = ["name"]
+					for f in (
+						"quality",
+						"custom_quality",
+						"color",
+						"colour",
+						"gsm",
+						"fabric_gsm",
+						"lam_gsm",
+						"item_code",
+						"production_item",
+					):
+						if frappe.db.has_column("Planning Table", f):
+							pt_fields.append(f)
 					pts = []
-				for pt in pts:
-					q = _cstr(pt.get("quality") or pt.get("custom_quality") or "")
-					c = _cstr(pt.get("color") or pt.get("colour") or "")
-					g = cint(pt.get("gsm") or pt.get("fabric_gsm") or pt.get("lam_gsm") or 0)
-					if not q:
-						ic = _cstr(pt.get("item_code") or pt.get("production_item") or "")
-						if ic:
+					try:
+						pts = frappe.get_all(
+							"Planning Table",
+							or_filters=pt_link_filters,
+							fields=pt_fields,
+							limit_page_length=50,
+						) or []
+					except Exception:
+						# Bad filter format used to queue a client Message even when caught
+						try:
+							frappe.clear_messages()
+						except Exception:
+							pass
+						# Fallback: try each link field as a dict filter
+						seen_pt = set()
+						for cond in pt_link_filters:
 							try:
-								from production_entry.production_planning.scheduler_api import (
-									resolve_quality_color_gsm_from_item_code,
-								)
-
-								rq, rc, rg = resolve_quality_color_gsm_from_item_code(ic)
-								q = q or _cstr(rq)
-								c = c or _cstr(rc)
-								g = g or cint(rg or 0)
+								rows = frappe.get_all(
+									"Planning Table",
+									filters={cond[0]: pp_id},
+									fields=pt_fields,
+									limit_page_length=50,
+								) or []
 							except Exception:
-								pass
-					_add(q, c, g)
+								try:
+									frappe.clear_messages()
+								except Exception:
+									pass
+								rows = []
+							for row in rows:
+								nm = _cstr(row.get("name"))
+								if nm and nm in seen_pt:
+									continue
+								if nm:
+									seen_pt.add(nm)
+								pts.append(row)
+					for pt in pts:
+						q = _cstr(pt.get("quality") or pt.get("custom_quality") or "")
+						c = _cstr(pt.get("color") or pt.get("colour") or "")
+						g = cint(pt.get("gsm") or pt.get("fabric_gsm") or pt.get("lam_gsm") or 0)
+						if not q:
+							ic = _cstr(pt.get("item_code") or pt.get("production_item") or "")
+							if ic:
+								try:
+									from production_entry.production_planning.scheduler_api import (
+										resolve_quality_color_gsm_from_item_code,
+									)
 
-		spr_name = _cstr(spr_name)
-		if spr_name and frappe.db.exists("Shaft Production Run", spr_name):
-			spr = frappe.get_doc("Shaft Production Run", spr_name)
-			for it in spr.get("items") or []:
-				_add(
-					getattr(it, "quality", None) or "",
-					getattr(it, "color", None) or getattr(it, "colour", None) or "",
-					getattr(it, "gsm", None) or getattr(it, "custom_fabric_gsm", None) or 0,
-				)
-			for sj in spr.get("shaft_jobs") or []:
-				_add(
-					getattr(sj, "quality", None) or "",
-					getattr(sj, "color", None) or getattr(sj, "colour", None) or "",
-					getattr(sj, "gsm", None) or 0,
-				)
+									rq, rc, rg = resolve_quality_color_gsm_from_item_code(ic)
+									q = q or _cstr(rq)
+									c = c or _cstr(rc)
+									g = g or cint(rg or 0)
+								except Exception:
+									pass
+						_add(q, c, g)
+
+			spr_name = _cstr(spr_name)
+			if spr_name and frappe.db.exists("Shaft Production Run", spr_name):
+				spr = frappe.get_doc("Shaft Production Run", spr_name)
+				for it in spr.get("items") or []:
+					_add(
+						getattr(it, "quality", None) or "",
+						getattr(it, "color", None) or getattr(it, "colour", None) or "",
+						getattr(it, "gsm", None) or getattr(it, "custom_fabric_gsm", None) or 0,
+					)
+				for sj in spr.get("shaft_jobs") or []:
+					_add(
+						getattr(sj, "quality", None) or "",
+						getattr(sj, "color", None) or getattr(sj, "colour", None) or "",
+						getattr(sj, "gsm", None) or 0,
+					)
+		except Exception:
+			try:
+				frappe.clear_messages()
+			except Exception:
+				pass
+			frappe.log_error(frappe.get_traceback(), "lot_sample_combo_fallback")
 
 	if not order_code:
 		order_code = _gsm_order_code_for_pp(pp_id)
