@@ -9280,28 +9280,8 @@ async function addLaminationRollRowsViaSpr() {
     selectedEntries.value.find((e) => e.ppId === target.ppId)?.job_id ||
     "";
 
-  const n = await new Promise((resolve) => {
-    frappe.prompt(
-      [
-        {
-          fieldname: "roll_lines_to_add",
-          fieldtype: "Int",
-          label: __("Roll lines to add"),
-          reqd: 1,
-          default: 1,
-          description: __("Adds exactly this many new roll lines for the selected job."),
-        },
-      ],
-      (v) => resolve(cint(v.roll_lines_to_add)),
-      __("Lamination — add roll lines"),
-      __("Add")
-    );
-  });
-  if (!n || n < 1) {
-    return;
-  }
-
-  frappe.dom.freeze(__("Adding roll lines…"));
+  // One click = one roll line (no count prompt). Click again to add the next.
+  frappe.dom.freeze(__("Adding roll line…"));
   try {
     const r = await frappe.call({
       method:
@@ -9309,19 +9289,19 @@ async function addLaminationRollRowsViaSpr() {
       args: {
         spr_name: sprName,
         job_id: jobId || undefined,
-        exact_roll_lines: n,
+        exact_roll_lines: 1,
       },
     });
-    const added = cint(r.message?.added || r.message?.roll_lines_added || n);
+    const added = cint(r.message?.added || r.message?.roll_lines_added || 1);
     frappe.show_alert({
-      message: __("Added {0} roll line(s) on {1}", [added, sprName]),
+      message: __("Added {0} roll line on {1}", [added, sprName]),
       indicator: "green",
     });
     await refreshSessionFromServer({ quiet: true, merge: true });
     await fetchOrders();
   } catch (e) {
     console.error(e);
-    frappe.msgprint(__("Could not add roll lines to Shaft Production Run."));
+    frappe.msgprint(__("Could not add roll line to Shaft Production Run."));
   } finally {
     frappe.dom.unfreeze();
   }
