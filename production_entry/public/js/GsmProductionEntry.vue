@@ -395,6 +395,7 @@
                   @click="openWastageDialog"
                 >Wastage</button>
                 <button
+                  v-if="!isLaminationMode"
                   type="button"
                   class="gpe-btn"
                   :disabled="!canOpenWastageRecycle"
@@ -5509,6 +5510,7 @@ function openWastageDialog() {
     sessionSprList: wastageRecycleSprList.value,
     rollLines: rollLines.value,
     onRollWasted: handleRollWasted,
+    laminationMode: !!isLaminationMode.value,
     ...preferredSprPickContext(),
   });
 }

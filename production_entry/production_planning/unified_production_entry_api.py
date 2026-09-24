@@ -4977,6 +4977,7 @@ _GSM_WASTAGE_CHILD_SPECS = (
 	("custom_recycled_wastage_details", "Recycled Wastage Details"),
 	("custom_recycled_wastage_details", "Recycled Wastage Detail Row"),
 	("custom_gsm_manual_recycle_details", "GSM Manual Recycle Row"),
+	("custom_other_wastages", "Other Wastages"),
 )
 
 _GSM_MANUAL_RECYCLE_FIELD = "custom_gsm_manual_recycle_details"
@@ -6477,6 +6478,83 @@ def mark_gsm_roll_waste(spr_name, roll_payload=None, batch_no=None, row_name=Non
 
 		roll_waste_child = (spr.custom_roll_waste or [])[-1]
 		return _gsm_roll_waste_response(spr, roll_waste_child, waste_row, removed_names)
+
+
+@frappe.whitelist(methods=["GET", "POST"])
+def save_gsm_other_wastages(spr_name=None, updates_json=None):
+	"""Update Wastage Quantity on SPR ``custom_other_wastages`` (Other Wastages) rows.
+
+	``updates_json``: list of ``{row_name|name, quantity}`` — only quantity is written.
+	"""
+	from production_entry.production_planning.doctype.shaft_production_run.shaft_production_run import (
+		_spr_operation_lock,
+		_gsm_publish_session_update,
+	)
+
+	spr_name = _cstr(spr_name).strip()
+	if not spr_name or not frappe.db.exists("Shaft Production Run", spr_name):
+		frappe.throw(_("Shaft Production Run not found"))
+
+	updates = _parse_json_arg(updates_json, [])
+	if isinstance(updates, dict):
+		updates = [updates]
+	if not isinstance(updates, list) or not updates:
+		frappe.throw(_("No wastage quantity updates provided"))
+
+	qty_by_name = {}
+	for u in updates:
+		if not isinstance(u, dict):
+			continue
+		rn = _cstr(u.get("row_name") or u.get("name") or "").strip()
+		if not rn:
+			continue
+		qty_by_name[rn] = flt(u.get("quantity") or u.get("qty") or 0)
+
+	if not qty_by_name:
+		frappe.throw(_("No wastage row names to update"))
+
+	spr_meta = frappe.get_meta("Shaft Production Run")
+	fieldname = _gsm_resolve_spr_child_field(spr_meta, "custom_other_wastages", "Other Wastages")
+	if not fieldname:
+		frappe.throw(_("Other Wastages table is not configured on Shaft Production Run"))
+
+	with _spr_operation_lock(spr_name, "write", ttl_sec=60):
+		spr = frappe.get_doc("Shaft Production Run", spr_name)
+		if cint(spr.docstatus) != 0:
+			frappe.throw(_("Cannot update other wastages on a submitted Shaft Production Run"))
+		rows = list(spr.get(fieldname) or [])
+		if not rows:
+			frappe.throw(_("No Other Wastages rows on this Shaft Production Run"))
+		updated = 0
+		out_rows = []
+		for row in rows:
+			rn = _cstr(getattr(row, "name", None)).strip()
+			if rn in qty_by_name:
+				row.quantity = flt(qty_by_name[rn])
+				updated += 1
+			out_rows.append(
+				{
+					"name": rn,
+					"item_code": _cstr(getattr(row, "item_code", None)),
+					"item_name": _cstr(getattr(row, "item_name", None)),
+					"quantity": flt(getattr(row, "quantity", None)),
+					"uom": _cstr(getattr(row, "uom", None)),
+				}
+			)
+		if updated:
+			spr.flags._spr_incremental_roll_save = True
+			spr.save(ignore_permissions=True)
+			try:
+				_gsm_publish_session_update(spr)
+			except Exception:
+				pass
+
+	return {
+		"status": "ok",
+		"spr_name": spr_name,
+		"updated": updated,
+		"rows": out_rows,
+	}
 
 
 @frappe.whitelist(methods=["GET", "POST"])

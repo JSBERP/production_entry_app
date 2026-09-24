@@ -989,6 +989,126 @@ export async function openGsmWastageDialog(opts = {}) {
 	await _openRollWastage(sprRow.spr_name, sprRow, opts);
 }
 
+function _otherWastageTable(ctx) {
+	const tables = (ctx && ctx.tables) || {};
+	return (
+		tables.custom_other_wastages || {
+			rows: [],
+			columns: [],
+			resolved_fieldname: "custom_other_wastages",
+			configured: false,
+		}
+	);
+}
+
+function _otherWastageEditorHtml(rows) {
+	const list = Array.isArray(rows) ? rows : [];
+	if (!list.length) {
+		return `<div class="gwm-empty">${__(
+			"No Other Wastages rows on this SPR. Add rows on Shaft Production Run first."
+		)}</div>`;
+	}
+	const body = list
+		.map((r) => {
+			const name = _esc(r.name || "");
+			const qty = _flt(r.quantity);
+			return `<tr data-row="${name}">
+				<td>${_esc(r.item_code || "")}</td>
+				<td>${_esc(r.item_name || "")}</td>
+				<td class="gwm-num">
+					<input type="number" step="0.001" min="0" class="gwm-other-qty form-control"
+						data-row="${name}" value="${qty}" style="width:110px;text-align:right;" />
+				</td>
+				<td>${_esc(r.uom || "Kg")}</td>
+			</tr>`;
+		})
+		.join("");
+	return `<div class="gwm-table-wrap">
+		<table class="gwm-desk-table">
+			<thead><tr>
+				<th>${__("Item Code")}</th>
+				<th>${__("Item Name")}</th>
+				<th class="gwm-num">${__("Wastage Quantity")}</th>
+				<th>${__("UOM")}</th>
+			</tr></thead>
+			<tbody>${body}</tbody>
+		</table>
+	</div>
+	<p style="margin:10px 0 0;color:#64748b;font-size:12px;">${__(
+		"Enter quantity only. Changes save to Shaft Production Run → Other Wastages."
+	)}</p>`;
+}
+
+async function _openOtherWastages(sprName, sprRow, opts = {}) {
+	const ctx = await _fetchWastageContext(sprName);
+	const table = _otherWastageTable(ctx);
+	let rows = Array.isArray(table.rows) ? table.rows.slice() : [];
+
+	const d = new frappe.ui.Dialog({
+		title: __("Other Waste") + ` · ${sprRow.order_code || ""} · ${sprName}`,
+		size: "large",
+		fields: [
+			{
+				fieldname: "grid_html",
+				fieldtype: "HTML",
+				options: `<div class="gwm-shell"><div class="gwm-card">
+					<div class="gwm-section-title">${__("Other Wastages")}</div>
+					<div class="gwm-other-body">${_otherWastageEditorHtml(rows)}</div>
+				</div></div>`,
+			},
+		],
+		primary_action_label: __("Save Quantities"),
+		async primary_action() {
+			const updates = [];
+			d.$wrapper.find(".gwm-other-qty").each(function () {
+				const rn = String($(this).data("row") || "").trim();
+				if (!rn) {
+					return;
+				}
+				updates.push({
+					row_name: rn,
+					quantity: _flt($(this).val()),
+				});
+			});
+			if (!updates.length) {
+				frappe.msgprint(__("No other wastage rows to save."));
+				return;
+			}
+			d.get_primary_btn().prop("disabled", true);
+			try {
+				const r = await frappe.call({
+					method:
+						"production_entry.production_planning.unified_production_entry_api.save_gsm_other_wastages",
+					args: {
+						spr_name: sprName,
+						updates_json: JSON.stringify(updates),
+					},
+				});
+				const msg = r.message || {};
+				frappe.show_alert({
+					message: __("Saved {0} other wastage qty on {1}", [
+						Number(msg.updated || 0),
+						sprName,
+					]),
+					indicator: "green",
+				});
+				rows = Array.isArray(msg.rows) ? msg.rows : rows;
+				d.$wrapper.find(".gwm-other-body").html(_otherWastageEditorHtml(rows));
+			} catch (e) {
+				frappe.msgprint(e.message || __("Failed to save other wastages"));
+			} finally {
+				d.get_primary_btn().prop("disabled", false);
+			}
+		},
+		secondary_action_label: __("Back to Roll Waste"),
+		secondary_action() {
+			d.hide();
+			_openRollWastage(sprName, sprRow, opts);
+		},
+	});
+	d.show();
+}
+
 async function _openRunningPattyWastage(sprName, sprRow, opts = {}) {
 	const viewOpts = { sprRow, rollLines: opts.rollLines || [] };
 	const initial = await _renderPattyWastageView(sprName, viewOpts);
@@ -1071,19 +1191,25 @@ async function _openRollWastage(sprName, sprRow, opts) {
 		${_deskTableHtml(rollWasteCols, wasteRows, { showPrint: true })}
 	</div>
 	</div>`;
+	const lamMode = !!opts.laminationMode;
 	const rollHtml = `<div class="gwm-shell"><p style="margin:0 0 12px;color:#64748b;font-size:13px">${__(
-		"Roll waste saves to SPR immediately. Recycle uses saved patty / roll waste rows."
-	)}</p>${selectRollHtml}${existingWasteHtml}</div>`;
+		lamMode
+			? "Roll waste and Other Waste save to Shaft Production Run. Running Patty / Recycle are not used for lamination."
+			: "Roll waste saves to SPR immediately. Recycle uses saved patty / roll waste rows."
+	)}</p>
+	${
+		lamMode
+			? `<div class="gwm-actions" style="margin-bottom:12px;">
+			<button type="button" class="btn btn-default gwm-btn-other-waste">${__("Other Waste")}</button>
+		</div>`
+			: ""
+	}
+	${selectRollHtml}${existingWasteHtml}</div>`;
 
-	const d = new frappe.ui.Dialog({
+	const dialogOpts = {
 		title: __("Roll Wasteage") + ` · ${sprRow.order_code || ""}`,
 		size: "extra-large",
 		fields: [{ fieldname: "rolls_html", fieldtype: "HTML", options: rollHtml }],
-		secondary_action_label: __("View Patty Wastage"),
-		secondary_action() {
-			d.hide();
-			_openRunningPattyWastage(sprName, sprRow, opts);
-		},
 		primary_action_label: rolls.length ? __("Mark as Waste") : __("Refresh"),
 		async primary_action() {
 			if (!rolls.length) {
@@ -1141,13 +1267,29 @@ async function _openRollWastage(sprName, sprRow, opts) {
 				d.get_primary_btn().prop("disabled", false);
 			}
 		},
-	});
+	};
+	// Fabric GSM: allow jump to Running Patty. Lamination: no patty wastage.
+	if (!lamMode) {
+		dialogOpts.secondary_action_label = __("View Patty Wastage");
+		dialogOpts.secondary_action = () => {
+			d.hide();
+			_openRunningPattyWastage(sprName, sprRow, opts);
+		};
+	}
+
+	const d = new frappe.ui.Dialog(dialogOpts);
 	d.show();
 	_wireSelectAll(d.$wrapper, ".gwm-roll-cb", ".gwm-roll-all");
 	_bindWastagePrint(d.$wrapper, sprName, wasteTable.resolved_fieldname || "custom_roll_waste", wasteRows);
+	if (lamMode) {
+		d.$wrapper.on("click", ".gwm-btn-other-waste", () => {
+			d.hide();
+			_openOtherWastages(sprName, sprRow, opts);
+		});
+	}
 	_bindGwmLiveRefresh(d, async (dialog) => {
-		const ctx = await _fetchWastageContext(sprName);
-		const wasteTableLive = _rollWasteTable(ctx);
+		const ctxLive = await _fetchWastageContext(sprName);
+		const wasteTableLive = _rollWasteTable(ctxLive);
 		const wasteRowsLive = _uniqueRollWasteRows(wasteTableLive.rows || []);
 		const rollWasteColsLive = _apiColsToDesk(wasteTableLive.columns, DESK_ROLL_WASTE_COLS);
 		const html = `<div class="gwm-card" style="margin-top:12px;">
