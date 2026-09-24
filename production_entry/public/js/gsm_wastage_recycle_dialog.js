@@ -989,41 +989,35 @@ export async function openGsmWastageDialog(opts = {}) {
 	await _openRollWastage(sprRow.spr_name, sprRow, opts);
 }
 
-function _otherWastageTable(ctx) {
-	const tables = (ctx && ctx.tables) || {};
-	return (
-		tables.custom_other_wastages || {
-			rows: [],
-			columns: [],
-			resolved_fieldname: "custom_other_wastages",
-			configured: false,
-		}
-	);
-}
-
-function _otherWastageEditorHtml(rows) {
+function _otherWastageEditorHtml(rows, shaftVal) {
 	const list = Array.isArray(rows) ? rows : [];
-	if (!list.length) {
-		return `<div class="gwm-empty">${__(
-			"No Other Wastages rows on this SPR. Add rows on Shaft Production Run first."
-		)}</div>`;
-	}
-	const body = list
-		.map((r) => {
-			const name = _esc(r.name || "");
-			const qty = _flt(r.quantity);
-			return `<tr data-row="${name}">
-				<td>${_esc(r.item_code || "")}</td>
+	const shaft = _esc(shaftVal || "1");
+	const body = list.length
+		? list
+				.map((r) => {
+					const code = _esc(r.item_code || "");
+					const qty = _flt(r.quantity);
+					const missing = r.missing_item
+						? ` <span style="color:#b45309;font-size:11px;">(${__("Item missing")})</span>`
+						: "";
+					return `<tr data-item="${code}">
+				<td>${code}${missing}</td>
 				<td>${_esc(r.item_name || "")}</td>
 				<td class="gwm-num">
 					<input type="number" step="0.001" min="0" class="gwm-other-qty form-control"
-						data-row="${name}" value="${qty}" style="width:110px;text-align:right;" />
+						data-item="${code}" value="${qty}" style="width:110px;text-align:right;" />
 				</td>
 				<td>${_esc(r.uom || "Kg")}</td>
 			</tr>`;
-		})
-		.join("");
-	return `<div class="gwm-table-wrap">
+				})
+				.join("")
+		: `<tr><td colspan="4" class="gwm-empty">${__("No default waste items.")}</td></tr>`;
+	return `<div class="gwm-other-meta" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px;align-items:end;">
+		<label style="font-size:12px;font-weight:600;">${__("Shaft")}
+			<input type="text" class="form-control input-sm gwm-other-shaft" value="${shaft}" style="width:90px;" />
+		</label>
+	</div>
+	<div class="gwm-table-wrap">
 		<table class="gwm-desk-table">
 			<thead><tr>
 				<th>${__("Item Code")}</th>
@@ -1035,67 +1029,108 @@ function _otherWastageEditorHtml(rows) {
 		</table>
 	</div>
 	<p style="margin:10px 0 0;color:#64748b;font-size:12px;">${__(
-		"Enter quantity only. Changes save to Shaft Production Run → Other Wastages."
+		"Lamination defaults: WASTE - 012 … 016 and WASTE - 006. Enter quantity and Save — stored as Lamination Other Wastage (not on SPR)."
 	)}</p>`;
 }
 
 async function _openOtherWastages(sprName, sprRow, opts = {}) {
-	const ctx = await _fetchWastageContext(sprName);
-	const table = _otherWastageTable(ctx);
-	let rows = Array.isArray(table.rows) ? table.rows.slice() : [];
+	const OW_API = "production_entry.production_planning.lamination_other_wastage_api";
+	const ctx = {
+		run_date: opts.runDate || opts.run_date || "",
+		shift: opts.shift || "",
+		custom_unit: (opts.headerUnit || opts.custom_unit || opts.filterUnit || "").trim(),
+		shaft: String(opts.shaft || opts.shaftNo || "1").trim() || "1",
+		gsm_shift_session: opts.shiftSessionId || opts.gsm_shift_session || "",
+		doc_name: "",
+	};
+	if (!ctx.custom_unit) {
+		frappe.msgprint(__("Select a unit first."));
+		return;
+	}
+	if (!ctx.run_date || !ctx.shift) {
+		frappe.msgprint(__("Set Run Date and Shift first."));
+		return;
+	}
+
+	const load = async (shaftOverride) => {
+		const shaft = String(shaftOverride || ctx.shaft || "1").trim() || "1";
+		ctx.shaft = shaft;
+		const res = await frappe.call({
+			method: `${OW_API}.get_lamination_other_wastage`,
+			args: {
+				run_date: ctx.run_date,
+				shift: ctx.shift,
+				custom_unit: ctx.custom_unit,
+				shaft: ctx.shaft,
+				gsm_shift_session: ctx.gsm_shift_session || undefined,
+				doc_name: ctx.doc_name || undefined,
+			},
+		});
+		const msg = res.message || {};
+		ctx.doc_name = msg.name || "";
+		ctx.shaft = String(msg.shaft || ctx.shaft || "1");
+		return msg;
+	};
+
+	let payload = await load();
+	let rows = (payload.rows || []).map((r) => ({ ...r }));
 
 	const d = new frappe.ui.Dialog({
-		title: __("Other Waste") + ` · ${sprRow.order_code || ""} · ${sprName}`,
+		title:
+			__("Other Waste") +
+			` · ${ctx.run_date} · ${ctx.shift} · ${ctx.custom_unit}` +
+			(sprRow?.order_code ? ` · ${sprRow.order_code}` : ""),
 		size: "large",
 		fields: [
 			{
 				fieldname: "grid_html",
 				fieldtype: "HTML",
 				options: `<div class="gwm-shell"><div class="gwm-card">
-					<div class="gwm-section-title">${__("Other Wastages")}</div>
-					<div class="gwm-other-body">${_otherWastageEditorHtml(rows)}</div>
+					<div class="gwm-section-title">${__("Lamination Other Wastages")}</div>
+					<div class="gwm-other-body">${_otherWastageEditorHtml(rows, ctx.shaft)}</div>
 				</div></div>`,
 			},
 		],
-		primary_action_label: __("Save Quantities"),
+		primary_action_label: __("Save"),
 		async primary_action() {
+			const shaftVal = String(d.$wrapper.find(".gwm-other-shaft").val() || ctx.shaft || "1").trim() || "1";
+			ctx.shaft = shaftVal;
 			const updates = [];
 			d.$wrapper.find(".gwm-other-qty").each(function () {
-				const rn = String($(this).data("row") || "").trim();
-				if (!rn) {
+				const code = String($(this).data("item") || "").trim();
+				if (!code) {
 					return;
 				}
 				updates.push({
-					row_name: rn,
+					item_code: code,
 					quantity: _flt($(this).val()),
 				});
 			});
-			if (!updates.length) {
-				frappe.msgprint(__("No other wastage rows to save."));
-				return;
-			}
 			d.get_primary_btn().prop("disabled", true);
 			try {
 				const r = await frappe.call({
-					method:
-						"production_entry.production_planning.unified_production_entry_api.save_gsm_other_wastages",
+					method: `${OW_API}.save_lamination_other_wastage`,
 					args: {
-						spr_name: sprName,
-						updates_json: JSON.stringify(updates),
+						run_date: ctx.run_date,
+						shift: ctx.shift,
+						custom_unit: ctx.custom_unit,
+						shaft: ctx.shaft,
+						gsm_shift_session: ctx.gsm_shift_session || undefined,
+						doc_name: ctx.doc_name || undefined,
+						rows: JSON.stringify(updates),
 					},
 				});
-				const msg = r.message || {};
+				payload = r.message || {};
+				ctx.doc_name = payload.name || ctx.doc_name;
+				rows = (payload.rows || []).map((x) => ({ ...x }));
 				frappe.show_alert({
-					message: __("Saved {0} other wastage qty on {1}", [
-						Number(msg.updated || 0),
-						sprName,
-					]),
+					message: __("Saved {0}", [ctx.doc_name || __("Other Wastage")]),
 					indicator: "green",
 				});
-				rows = Array.isArray(msg.rows) ? msg.rows : rows;
-				d.$wrapper.find(".gwm-other-body").html(_otherWastageEditorHtml(rows));
+				d.$wrapper.find(".gwm-other-body").html(_otherWastageEditorHtml(rows, ctx.shaft));
+				bindShaftReload();
 			} catch (e) {
-				frappe.msgprint(e.message || __("Failed to save other wastages"));
+				frappe.msgprint(e.message || __("Failed to save other wastage"));
 			} finally {
 				d.get_primary_btn().prop("disabled", false);
 			}
@@ -1106,7 +1141,23 @@ async function _openOtherWastages(sprName, sprRow, opts = {}) {
 			_openRollWastage(sprName, sprRow, opts);
 		},
 	});
+
+	function bindShaftReload() {
+		d.$wrapper.find(".gwm-other-shaft").off("change").on("change", async function () {
+			const shaftVal = String($(this).val() || "1").trim() || "1";
+			try {
+				payload = await load(shaftVal);
+				rows = (payload.rows || []).map((x) => ({ ...x }));
+				d.$wrapper.find(".gwm-other-body").html(_otherWastageEditorHtml(rows, ctx.shaft));
+				bindShaftReload();
+			} catch (e) {
+				console.warn(e);
+			}
+		});
+	}
+
 	d.show();
+	bindShaftReload();
 }
 
 async function _openRunningPattyWastage(sprName, sprRow, opts = {}) {
@@ -1194,7 +1245,7 @@ async function _openRollWastage(sprName, sprRow, opts) {
 	const lamMode = !!opts.laminationMode;
 	const rollHtml = `<div class="gwm-shell"><p style="margin:0 0 12px;color:#64748b;font-size:13px">${__(
 		lamMode
-			? "Roll waste and Other Waste save to Shaft Production Run. Running Patty / Recycle are not used for lamination."
+			? "Roll waste saves to SPR. Other Waste saves as Lamination Other Wastage (unit/date/shaft) — not on SPR. Running Patty / Recycle are hidden for lamination."
 			: "Roll waste saves to SPR immediately. Recycle uses saved patty / roll waste rows."
 	)}</p>
 	${

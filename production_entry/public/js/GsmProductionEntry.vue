@@ -5506,11 +5506,20 @@ function openWastageDialog() {
     frappe.msgprint(__("Create SPRs for this shift before opening Wastage."));
     return;
   }
+  const shaftGuess =
+    rollLines.value.find((r) => cint(r.custom_no_of_shaft) > 0)?.custom_no_of_shaft ||
+    selectedEntries.value[0]?.jobId ||
+    "1";
   openGsmWastageDialog({
     sessionSprList: wastageRecycleSprList.value,
     rollLines: rollLines.value,
     onRollWasted: handleRollWasted,
     laminationMode: !!isLaminationMode.value,
+    headerUnit: headerUnit.value || filterUnit.value,
+    runDate: runDate.value,
+    shift: shift.value,
+    shiftSessionId: shiftSession.value?.name || "",
+    shaft: String(shaftGuess || "1"),
     ...preferredSprPickContext(),
   });
 }
