@@ -13016,7 +13016,7 @@ def reset_party_code_series(clear_sales_order_mirror_fields=0):
     }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["GET", "POST"])
 def get_color_chart_data(
     date=None,
     start_date=None,
@@ -13028,7 +13028,13 @@ def get_color_chart_data(
     lamination_process="104",
     board_slug=None,
 ):
-    """Safe wrapper to avoid UI 502s; logs root cause."""
+    """Safe wrapper to avoid UI 502s; logs root cause.
+
+    Requires a logged-in Desk user (not Guest). Explicit GET/POST avoids proxy/405
+    edge cases that surface as “not whitelisted” / Method Not Allowed after idle.
+    """
+    if not frappe.session.user or frappe.session.user == "Guest":
+        frappe.throw(_("Please log in to continue."), frappe.AuthenticationError)
     from production_entry.production_planning.board_access import resolve_board_slug
 
     enforce_board_read(
@@ -17427,7 +17433,21 @@ def _populate_planning_sheet_items(ps, doc):
         if is_existing:
             # Update all split pieces with latest metadata from SO (Qual/Color/etc if changed)
             for existing_psi in existing_psi_list:
-                # Update base info but PRESERVE unit and qty (don't overwrite board splits)
+                # FG rows (same SOI + FG identity): override qty/meter/rolls + item_code from SO.
+                # Non-FG BOM children keep prior qty (aligned separately via BOM sync).
+                _row_ic_ex = _cstr(getattr(existing_psi, "item_code", None)).strip()
+                if _planning_row_matches_so_fg(_row_ic_ex, item_code_str):
+                    if _row_ic_ex != item_code_str:
+                        existing_psi.item_code = it.item_code
+                        if getattr(it, "item_name", None):
+                            existing_psi.item_name = it.item_name
+                    existing_psi.qty = flt(it.qty)
+                    existing_psi.meter = flt(it.custom_meter)
+                    if hasattr(existing_psi, "custom_meter"):
+                        existing_psi.custom_meter = flt(it.custom_meter)
+                    existing_psi.meter_per_roll = m_roll
+                    existing_psi.no_of_rolls = flt(it.custom_no_of_rolls)
+                # Update base info; unit preserved below for board splits
                 existing_psi.uom = it.uom
                 existing_psi.quality = line_quality
                 existing_psi.custom_quality = qual or line_quality
@@ -17945,7 +17965,10 @@ def refresh_planning_sheet_colors(planning_sheet: str):
 
 
 def _spr_names_for_pp_item(pp_id: str, item_code: str = "") -> list:
-	"""All SPRs (draft + submitted) for a PP that contain roll lines for item_code."""
+	"""All SPRs (draft + submitted) for a PP that contain roll lines for item_code.
+
+	When ``item_code`` is blank, return all SPRs for the PP.
+	"""
 	pp_id = _cstr(pp_id).strip()
 	ic = _cstr(item_code).strip()
 	if not pp_id:
@@ -17968,155 +17991,352 @@ def _spr_names_for_pp_item(pp_id: str, item_code: str = "") -> list:
 	return out
 
 
+def _pp_header_spr_ids(pp_id: str) -> list:
+	"""SPR ids stored on Production Plan.custom_shaft_production_run_id (CSV)."""
+	pp_id = _cstr(pp_id).strip()
+	if not pp_id or not frappe.db.has_column("Production Plan", "custom_shaft_production_run_id"):
+		return []
+	raw = _cstr(frappe.db.get_value("Production Plan", pp_id, "custom_shaft_production_run_id")).strip()
+	return [sid for sid in _expand_spr_name_tokens(raw) if sid and frappe.db.exists("Shaft Production Run", sid)]
+
+
+def _norm_color_key(val) -> str:
+	return _normalize_color_text(val).upper().strip()
+
+
 @frappe.whitelist()
 def refresh_planning_sheet_spr_and_order_sheet(planning_sheet: str):
-    """Backfill Planning Table `order_sheet` and `spr_name` for a sheet even after submit."""
-    if not planning_sheet or not frappe.db.exists("Planning sheet", planning_sheet):
-        return {"status": "error", "message": "Planning sheet not found", "updated_order_sheet": 0, "updated_spr": 0}
+	"""Backfill Planning Table ``order_sheet`` (PP) and ``spr_name`` for a sheet.
 
-    def _pick_valid_pp(raw) -> str:
-        return _pick_valid_pp_id(raw)
+	Rules (per board row):
+	- Prefer Production Plans linked to this planning sheet.
+	- Match by ``item_code`` on PP items; when both row and PP have colour, colours must match
+	  (stops one colour's PP/SPR being stamped on every row).
+	- Clear wrong Order Sheet stamps that fail item or colour checks.
+	- SPR: prefer SPRs on the resolved PP that contain this item; else PP-header SPR /
+	  any SPR for that PP when colour matches (so SPR shows before roll lines exist).
+	"""
+	if not planning_sheet or not frappe.db.exists("Planning sheet", planning_sheet):
+		return {
+			"status": "error",
+			"message": "Planning sheet not found",
+			"updated_order_sheet": 0,
+			"updated_spr": 0,
+		}
 
-    sheet_pp = (
-        frappe.db.get_value("Planning sheet", planning_sheet, "custom_production_plan")
-        if frappe.db.has_column("Planning sheet", "custom_production_plan")
-        else ""
-    ) or (
-        frappe.db.get_value("Planning sheet", planning_sheet, "production_plan")
-        if frappe.db.has_column("Planning sheet", "production_plan")
-        else ""
-    ) or (frappe.db.get_value("Planning sheet", planning_sheet, "order_sheet") or "")
-    sheet_pp = _pick_valid_pp(sheet_pp)
+	def _pick_valid_pp(raw) -> str:
+		return _pick_valid_pp_id(raw)
 
-    rows = frappe.get_all(
-        "Planning Table",
-        filters={"parent": planning_sheet, "parenttype": "Planning sheet"},
-        fields=["name", "spr_name", "order_sheet", "item_code"],
-        order_by="idx asc",
-    ) or []
+	row_fields = ["name", "spr_name", "order_sheet", "item_code", "idx"]
+	for f in ("color", "gsm", "width_inch"):
+		if frappe.db.has_column("Planning Table", f):
+			row_fields.append(f)
 
-    pp_to_spr = {}
-    updated_order_sheet = 0
-    updated_spr = 0
+	rows = frappe.get_all(
+		"Planning Table",
+		filters={"parent": planning_sheet, "parenttype": "Planning sheet"},
+		fields=row_fields,
+		order_by="idx asc",
+	) or []
 
-    candidate_pps = set()
-    if sheet_pp:
-        candidate_pps.add(sheet_pp)
-    for col in ("custom_planning_sheet", "planning_sheet"):
-        if frappe.db.has_column("Production Plan", col):
-            for ppn in frappe.db.get_all("Production Plan", filters={col: planning_sheet, "docstatus": ["<", 2]}, pluck="name"):
-                if ppn:
-                    candidate_pps.add(ppn)
-    for row in rows:
-        item_pp = _pick_valid_pp(_get_item_level_production_plan(row.get("name")))
-        if item_pp:
-            candidate_pps.add(item_pp)
+	# Candidate PPs: sheet-linked + currently stamped + item-level
+	candidate_pps = set()
+	for col in ("custom_planning_sheet", "planning_sheet"):
+		if frappe.db.has_column("Production Plan", col):
+			for ppn in frappe.db.get_all(
+				"Production Plan",
+				filters={col: planning_sheet, "docstatus": ["<", 2]},
+				pluck="name",
+			):
+				if ppn:
+					candidate_pps.add(ppn)
 
-    pp_by_item_code = {}
-    if candidate_pps:
-        fmt = ", ".join(["%s"] * len(candidate_pps))
-        q = frappe.db.sql(
-            f"""
-            SELECT ppi.item_code, ppi.parent as production_plan
-            FROM `tabProduction Plan Item` ppi
-            WHERE ppi.parent IN ({fmt})
-              AND IFNULL(ppi.item_code, '') != ''
-            """,
-            tuple(candidate_pps),
-            as_dict=True,
-        ) or []
-        for r in q:
-            it = (r.get("item_code") or "").strip()
-            ppn = (r.get("production_plan") or "").strip()
-            if it and ppn:
-                pp_by_item_code.setdefault(it, [])
-                if ppn not in pp_by_item_code[it]:
-                    pp_by_item_code[it].append(ppn)
+	sheet_pp = ""
+	for col in ("custom_production_plan", "production_plan", "order_sheet"):
+		if frappe.db.has_column("Planning sheet", col):
+			sheet_pp = _pick_valid_pp(frappe.db.get_value("Planning sheet", planning_sheet, col))
+			if sheet_pp:
+				candidate_pps.add(sheet_pp)
+				break
 
-    def _pick_spr_for_pp(pp_id: str) -> str:
-        pp_id = (pp_id or "").strip()
-        if not pp_id:
-            return ""
-        if pp_id in pp_to_spr:
-            return pp_to_spr[pp_id]
+	for row in rows:
+		item_pp = _pick_valid_pp(_get_item_level_production_plan(row.get("name")))
+		if item_pp:
+			candidate_pps.add(item_pp)
+		cur = _pick_valid_pp(row.get("order_sheet"))
+		if cur:
+			candidate_pps.add(cur)
 
-        spr_name = ""
-        raw = str(frappe.db.get_value("Production Plan", pp_id, "custom_shaft_production_run_id") or "").strip()
-        if raw:
-            for p in [x.strip() for x in raw.split(",") if x and x.strip()]:
-                if frappe.db.exists("Shaft Production Run", p) and _spr_belongs_to_pp(p, pp_id):
-                    spr_name = p
-                    break
-        if not spr_name:
-            spr_name = (
-                frappe.db.get_value(
-                    "Shaft Production Run",
-                    {"production_plan": pp_id, "docstatus": ["<", 2]},
-                    "name",
-                    order_by="modified desc",
-                )
-                or ""
-            )
-            if spr_name and not _spr_belongs_to_pp(spr_name, pp_id):
-                spr_name = ""
-        pp_to_spr[pp_id] = spr_name
-        return spr_name
+	# PP meta: color + sheet link + item codes (from po_items)
+	pp_meta = {}  # pp -> {color, sheet_linked, items:set}
+	pp_cols = ["name"]
+	if frappe.db.has_column("Production Plan", "custom_color"):
+		pp_cols.append("custom_color")
+	for col in ("custom_planning_sheet", "planning_sheet"):
+		if frappe.db.has_column("Production Plan", col):
+			pp_cols.append(col)
 
-    for r in rows:
-        row_pp = _row_order_sheet_pp(row_name=r.get("name"), row_dict=r)
-        if not row_pp:
-            row_pp = _pick_valid_pp(_get_item_level_production_plan(r.name))
-        if not row_pp:
-            item_code = (r.get("item_code") or "").strip()
-            choices = pp_by_item_code.get(item_code) or []
-            if len(choices) == 1:
-                row_pp = choices[0]
-            elif len(choices) > 1:
-                existing = _pick_valid_pp(r.get("order_sheet"))
-                row_pp = existing if existing in choices else ""
-        if not row_pp:
-            row_pp = _pick_valid_pp(r.get("order_sheet"))
-        if not row_pp:
-            row_pp = sheet_pp
-        os_field = _psi_order_sheet_field() or "order_sheet"
-        cur_os = _pick_valid_pp(r.get("order_sheet"))
-        if row_pp and cur_os and cur_os != row_pp:
-            row_pp = cur_os
-        if row_pp and cur_os != row_pp:
-            if frappe.db.has_column("Planning Table", os_field):
-                frappe.db.set_value("Planning Table", r["name"], os_field, row_pp, update_modified=False)
-                updated_order_sheet += 1
+	if candidate_pps:
+		for pp_row in frappe.get_all(
+			"Production Plan",
+			filters={"name": ["in", list(candidate_pps)], "docstatus": ["<", 2]},
+			fields=pp_cols,
+		) or []:
+			ppn = _cstr(pp_row.get("name")).strip()
+			sheet_linked = False
+			for col in ("custom_planning_sheet", "planning_sheet"):
+				if col in pp_row and _cstr(pp_row.get(col)).strip() == planning_sheet:
+					sheet_linked = True
+			pp_meta[ppn] = {
+				"color": _norm_color_key(pp_row.get("custom_color")),
+				"sheet_linked": sheet_linked,
+				"items": set(),
+				"item_colors": {},  # item_code -> color from po_items custom_color
+			}
 
-        row_spr_ids = _spr_names_for_pp_item(row_pp, r.get("item_code")) if row_pp else []
-        if not row_spr_ids and row_pp:
-            row_spr_single = _pick_spr_for_pp(row_pp)
-            if row_spr_single:
-                row_spr_ids = [row_spr_single]
-        cur_raw = str((r.get("spr_name") or "")).strip()
-        cur_ids = _expand_spr_name_tokens(cur_raw)
-        valid_ids = []
-        seen_local = set()
-        for sid in cur_ids:
-            if row_pp and not _spr_belongs_to_pp(sid, row_pp):
-                continue
-            if sid not in seen_local:
-                seen_local.add(sid)
-                valid_ids.append(sid)
-        for sid in row_spr_ids:
-            if sid and sid not in seen_local:
-                seen_local.add(sid)
-                valid_ids.append(sid)
-        new_spr_val = ", ".join(valid_ids)
-        if new_spr_val != cur_raw:
-            frappe.db.set_value("Planning Table", r["name"], "spr_name", new_spr_val, update_modified=False)
-            updated_spr += 1
+		fmt = ", ".join(["%s"] * len(candidate_pps))
+		poi_color_col = ""
+		if frappe.db.has_column("Production Plan Item", "custom_color"):
+			poi_color_col = ", ppi.custom_color"
+		q = frappe.db.sql(
+			f"""
+			SELECT ppi.item_code, ppi.parent as production_plan {poi_color_col}
+			FROM `tabProduction Plan Item` ppi
+			INNER JOIN `tabProduction Plan` pp ON pp.name = ppi.parent
+			WHERE ppi.parent IN ({fmt})
+			  AND IFNULL(ppi.item_code, '') != ''
+			  AND pp.docstatus < 2
+			""",
+			tuple(candidate_pps),
+			as_dict=True,
+		) or []
+		for r in q:
+			it = _cstr(r.get("item_code")).strip()
+			ppn = _cstr(r.get("production_plan")).strip()
+			if not it or not ppn:
+				continue
+			if ppn not in pp_meta:
+				pp_meta[ppn] = {"color": "", "sheet_linked": False, "items": set(), "item_colors": {}}
+			pp_meta[ppn]["items"].add(it)
+			ic_color = _norm_color_key(r.get("custom_color")) if poi_color_col else ""
+			if ic_color:
+				pp_meta[ppn]["item_colors"][it] = ic_color
 
-    return {
-        "status": "ok",
-        "updated_order_sheet": updated_order_sheet,
-        "updated_spr": updated_spr,
-        "message": f"Updated Order Sheet on {updated_order_sheet} row(s), SPR on {updated_spr} row(s).",
-    }
+	# Global fallback for items with no candidate PP yet — restrict to sheet-linked PPs when possible
+	item_codes = sorted(
+		{(r.get("item_code") or "").strip() for r in rows if (r.get("item_code") or "").strip()}
+	)
+	missing = [ic for ic in item_codes if not any(ic in (m.get("items") or set()) for m in pp_meta.values())]
+	if missing:
+		fmt_ic = ", ".join(["%s"] * len(missing))
+		sheet_filter = ""
+		params = list(missing)
+		if frappe.db.has_column("Production Plan", "custom_planning_sheet"):
+			sheet_filter = " AND IFNULL(pp.custom_planning_sheet, '') = %s"
+			params.append(planning_sheet)
+		elif frappe.db.has_column("Production Plan", "planning_sheet"):
+			sheet_filter = " AND IFNULL(pp.planning_sheet, '') = %s"
+			params.append(planning_sheet)
+		q2 = frappe.db.sql(
+			f"""
+			SELECT ppi.item_code, ppi.parent as production_plan
+			FROM `tabProduction Plan Item` ppi
+			INNER JOIN `tabProduction Plan` pp ON pp.name = ppi.parent
+			WHERE ppi.item_code IN ({fmt_ic})
+			  AND pp.docstatus < 2
+			  {sheet_filter}
+			ORDER BY pp.modified DESC
+			""",
+			tuple(params),
+			as_dict=True,
+		) or []
+		for r in q2:
+			it = _cstr(r.get("item_code")).strip()
+			ppn = _cstr(r.get("production_plan")).strip()
+			if not it or not ppn:
+				continue
+			if ppn not in pp_meta:
+				pp_color = ""
+				if frappe.db.has_column("Production Plan", "custom_color"):
+					pp_color = _norm_color_key(frappe.db.get_value("Production Plan", ppn, "custom_color"))
+				pp_meta[ppn] = {
+					"color": pp_color,
+					"sheet_linked": True,
+					"items": set(),
+					"item_colors": {},
+				}
+			pp_meta[ppn]["items"].add(it)
+
+	def _pp_color_ok(pp_id: str, row_color: str, item_code: str = "") -> bool:
+		"""Reject PP when colours conflict. Empty colour on either side = OK."""
+		meta = pp_meta.get(pp_id) or {}
+		row_c = _norm_color_key(row_color)
+		if not row_c:
+			return True
+		item_c = _norm_color_key((meta.get("item_colors") or {}).get(item_code or ""))
+		if item_c and item_c != row_c:
+			return False
+		pp_c = _norm_color_key(meta.get("color"))
+		if pp_c and pp_c != row_c:
+			return False
+		return True
+
+	def _pp_has_item(pp_id: str, item_code: str) -> bool:
+		item_code = _cstr(item_code).strip()
+		if not pp_id or not item_code:
+			return False
+		return item_code in ((pp_meta.get(pp_id) or {}).get("items") or set())
+
+	def _score_pp(pp_id: str, item_code: str, row_color: str) -> int:
+		"""Higher is better. 0 = reject."""
+		if not pp_id or pp_id not in pp_meta:
+			return 0
+		if not _pp_has_item(pp_id, item_code):
+			return 0
+		if not _pp_color_ok(pp_id, row_color, item_code):
+			return 0
+		meta = pp_meta[pp_id]
+		score = 10
+		if meta.get("sheet_linked"):
+			score += 50
+		row_c = _norm_color_key(row_color)
+		pp_c = _norm_color_key(meta.get("color"))
+		item_c = _norm_color_key((meta.get("item_colors") or {}).get(item_code))
+		if row_c and (pp_c == row_c or item_c == row_c):
+			score += 100
+		elif row_c and pp_c and pp_c != row_c:
+			return 0
+		return score
+
+	def _resolve_row_pp(row) -> str:
+		item_code = _cstr(row.get("item_code")).strip()
+		row_color = row.get("color") or ""
+		if not item_code:
+			return ""
+
+		cur_os = _pick_valid_pp(row.get("order_sheet"))
+		scored = []
+		for ppn in pp_meta:
+			sc = _score_pp(ppn, item_code, row_color)
+			if sc > 0:
+				scored.append((sc, ppn))
+		scored.sort(key=lambda x: (-x[0], x[1]))
+
+		# Keep current stamp only if it still scores (item + colour OK)
+		if cur_os:
+			cur_score = _score_pp(cur_os, item_code, row_color)
+			if cur_score > 0:
+				# Prefer current if it's among top scores
+				if not scored or cur_score >= scored[0][0]:
+					return cur_os
+
+		if scored:
+			return scored[0][1]
+		return ""
+
+	def _resolve_row_spr(row_pp: str, item_code: str, row_color: str, cur_raw: str) -> str:
+		if not row_pp:
+			return ""
+		item_code = _cstr(item_code).strip()
+		# Prefer SPRs that already have this item's roll lines
+		by_item = _spr_names_for_pp_item(row_pp, item_code) if item_code else []
+		header_sprs = _pp_header_spr_ids(row_pp)
+		all_pp_sprs = _spr_names_for_pp_item(row_pp, "")  # all SPRs for PP
+
+		# Colour must be OK on PP before accepting any SPR for this row
+		if not _pp_color_ok(row_pp, row_color, item_code):
+			return ""
+
+		chosen = []
+		seen = set()
+
+		def _add(sid):
+			sid = _cstr(sid).strip()
+			if not sid or sid in seen:
+				return
+			if not _spr_belongs_to_pp(sid, row_pp):
+				return
+			seen.add(sid)
+			chosen.append(sid)
+
+		for sid in by_item:
+			_add(sid)
+		# If no roll-line match yet, use PP header SPR / any SPR for this PP (colour already validated)
+		if not chosen:
+			for sid in header_sprs:
+				_add(sid)
+		if not chosen:
+			for sid in all_pp_sprs:
+				_add(sid)
+
+		# Keep currently stamped SPRs that still belong to this PP
+		cur_ids = _expand_spr_name_tokens(cur_raw)
+		kept = []
+		for sid in cur_ids:
+			if not _spr_belongs_to_pp(sid, row_pp):
+				continue
+			# If SPR already has roll lines, require this item_code
+			has_any = frappe.db.exists("Shaft Production Run Item", {"parent": sid})
+			if has_any and item_code:
+				if not frappe.db.exists(
+					"Shaft Production Run Item", {"parent": sid, "item_code": item_code}
+				):
+					continue
+			kept.append(sid)
+
+		# Merge: preferred first, then kept not already listed
+		final = []
+		seen2 = set()
+		for sid in chosen + kept:
+			if sid and sid not in seen2:
+				seen2.add(sid)
+				final.append(sid)
+		return ", ".join(final)
+
+	os_field = _psi_order_sheet_field() or "order_sheet"
+	updated_order_sheet = 0
+	updated_spr = 0
+	cleared_wrong = 0
+
+	for r in rows:
+		item_code = _cstr(r.get("item_code")).strip()
+		row_color = r.get("color") or ""
+		cur_os = _pick_valid_pp(r.get("order_sheet"))
+		row_pp = _resolve_row_pp(r)
+
+		if row_pp != cur_os:
+			if frappe.db.has_column("Planning Table", os_field):
+				frappe.db.set_value(
+					"Planning Table", r["name"], os_field, row_pp or None, update_modified=False
+				)
+				updated_order_sheet += 1
+				if cur_os and not row_pp:
+					cleared_wrong += 1
+				elif cur_os and row_pp and cur_os != row_pp:
+					cleared_wrong += 1
+
+		cur_raw = str((r.get("spr_name") or "")).strip()
+		new_spr_val = _resolve_row_spr(row_pp, item_code, row_color, cur_raw)
+		if new_spr_val != cur_raw:
+			frappe.db.set_value(
+				"Planning Table", r["name"], "spr_name", new_spr_val or None, update_modified=False
+			)
+			updated_spr += 1
+
+	frappe.db.commit()
+	if updated_order_sheet == 0 and updated_spr == 0:
+		msg = "No Order Sheet / SPR changes — rows already match, or no PP found for this colour/item."
+	else:
+		msg = f"Updated Order Sheet on {updated_order_sheet} row(s), SPR on {updated_spr} row(s)."
+	if cleared_wrong:
+		msg += f" Cleared/replaced {cleared_wrong} wrong PP stamp(s)."
+	return {
+		"status": "ok",
+		"updated_order_sheet": updated_order_sheet,
+		"updated_spr": updated_spr,
+		"cleared_wrong": cleared_wrong,
+		"message": msg,
+	}
 
 
 def sync_spr_planning_table_links(spr_name: str) -> dict:
@@ -18262,6 +18482,13 @@ def manual_update_planning_sheet_links(planning_sheet: str, mappings):
         if row_name not in valid_rows:
             errors.append(f"Line {i}: row {row_name} is not part of {planning_sheet}")
             continue
+        # Allow clearing: pass "-" or "CLEAR" (or blank with explicit clear_*) to wipe links.
+        clear_pp = pp.upper() in ("-", "CLEAR", "NONE", "NULL")
+        clear_spr = spr.upper() in ("-", "CLEAR", "NONE", "NULL")
+        if clear_pp:
+            pp = ""
+        if clear_spr:
+            spr = ""
         if pp and not frappe.db.exists("Production Plan", pp):
             errors.append(f"Line {i}: Production Plan {pp} not found")
             continue
@@ -18273,13 +18500,23 @@ def manual_update_planning_sheet_links(planning_sheet: str, mappings):
             if spr_pp and spr_pp != pp:
                 errors.append(f"Line {i}: SPR {spr} belongs to {spr_pp}, not {pp}")
                 continue
+        # If PP is set, verify this row's item is on that PP (blocks wrong-colour stamps).
+        row_ic = _cstr(frappe.db.get_value("Planning Table", row_name, "item_code")).strip()
+        if pp and row_ic and not frappe.db.exists(
+            "Production Plan Item", {"parent": pp, "item_code": row_ic}
+        ):
+            errors.append(
+                f"Line {i}: item {row_ic} is not on Order Sheet {pp} (wrong colour PP)"
+            )
+            continue
 
-        if pp:
-            frappe.db.set_value("Planning Table", row_name, "order_sheet", pp, update_modified=False)
-        if spr:
-            frappe.db.set_value("Planning Table", row_name, "spr_name", spr, update_modified=False)
+        if clear_pp or pp:
+            frappe.db.set_value("Planning Table", row_name, "order_sheet", pp or None, update_modified=False)
+        if clear_spr or spr:
+            frappe.db.set_value("Planning Table", row_name, "spr_name", spr or None, update_modified=False)
         updated += 1
 
+    frappe.db.commit()
     return {
         "status": "ok",
         "updated": updated,
@@ -27921,27 +28158,69 @@ def _planning_sheet_existing_soi_map(ps):
 	return existing_items_map
 
 
+def _planning_row_matches_so_fg(row_item_code, so_fg_item_code):
+	"""True when a planning row is the SO FG line (exact, design-family, or same process).
+
+	SO edits often change the FG item_code while keeping the Sales Order Item ``name``.
+	Matching only on exact item_code skipped overrides (qty stayed stale; toast looked like a no-op).
+	"""
+	row_ic = _cstr(row_item_code).strip()
+	fg = _cstr(so_fg_item_code).strip()
+	if not row_ic or not fg:
+		return False
+	if row_ic == fg:
+		return True
+	if _same_fg_design_family(row_ic, fg):
+		return True
+	# Same process code → FG was replaced on the SO (e.g. fabric 100…0840 → 100…0865).
+	rp = _bom_item_process_code(row_ic) or _item_process_prefix(row_ic)
+	sp = _bom_item_process_code(fg) or _item_process_prefix(fg)
+	return bool(rp and sp and rp == sp)
+
+
 def _update_fg_qty_meter_on_planning_sheet_doc(ps, so_item):
-	"""Update qty / meter / rolls on FG rows only (same item_code + SO line key)."""
+	"""Update qty / meter / rolls on FG rows linked to this SO line (SOI key).
+
+	Matches by SOI + FG identity (exact / design-family / same process) so an edited
+	FG item_code still overrides the existing planning row instead of leaving stale qty.
+	"""
 	fg = _cstr(so_item.item_code).strip()
 	soi = _cstr(so_item.name).strip()
 	if not fg or not soi:
 		return 0
 	updated = 0
 	tables = []
-	for field in ("planned_items", "items"):
-		if hasattr(ps, field) or ps.meta.has_field(field):
-			tables.append(list(ps.get(field) or []))
-	for rows in tables:
-		for row in rows:
+	seen = set()
+	for field in (
+		"planned_items",
+		"custom_planned_items",
+		"planning_table",
+		"custom_planning_table",
+		"table",
+		"items",
+	):
+		if not (hasattr(ps, field) or ps.meta.has_field(field)):
+			continue
+		for row in list(ps.get(field) or []):
+			row_id = getattr(row, "name", None) or id(row)
+			if row_id in seen:
+				continue
+			seen.add(row_id)
 			row_soi = _cstr(
 				getattr(row, "sales_order_item", None)
 				or getattr(row, "so_item", None)
 				or getattr(row, "custom_sales_order_item", None)
 				or ""
 			).strip()
-			if row_soi != soi or _cstr(row.item_code).strip() != fg:
+			if row_soi != soi:
 				continue
+			if not _planning_row_matches_so_fg(getattr(row, "item_code", None), fg):
+				continue
+			# Sync FG identity when the SO item code changed.
+			if _cstr(getattr(row, "item_code", None)).strip() != fg:
+				row.item_code = fg
+				if getattr(so_item, "item_name", None):
+					row.item_name = so_item.item_name
 			row.qty = flt(so_item.qty)
 			row.uom = so_item.uom
 			row.meter = flt(so_item.get("custom_meter") or 0)
@@ -27949,6 +28228,10 @@ def _update_fg_qty_meter_on_planning_sheet_doc(ps, so_item):
 				row.custom_meter = flt(so_item.get("custom_meter") or 0)
 			row.meter_per_roll = flt(so_item.get("custom_meter_per_roll") or 0)
 			row.no_of_rolls = flt(so_item.get("custom_no_of_rolls") or 0)
+			if hasattr(row, "sales_order_item") and not _cstr(getattr(row, "sales_order_item", None)).strip():
+				row.sales_order_item = soi
+			if hasattr(row, "so_item") and not _cstr(getattr(row, "so_item", None)).strip():
+				row.so_item = soi
 			updated += 1
 	return updated
 

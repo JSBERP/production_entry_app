@@ -452,9 +452,10 @@ frappe.ui.form.on('Planning sheet', {
                 freeze_message: __('Updating SPR and Order Sheet links...'),
                 callback: function(r) {
                     const m = r.message || {};
+                    const changed = cint(m.updated_order_sheet) + cint(m.updated_spr);
                     frappe.show_alert({
                         message: __(m.message || 'SPR/Order Sheet update completed.'),
-                        indicator: 'green'
+                        indicator: changed > 0 ? 'green' : 'orange'
                     });
                     ps_reload_planning_sheet_doc(frm);
                 }
@@ -487,7 +488,11 @@ frappe.ui.form.on('Planning sheet', {
                         .map((ln) => {
                             const p = ln.split(',').map((x) => (x || '').trim());
                             const first = p[0] || '';
-                            const looksLikeRow = /^PT-|^new-|^ROW-|^PTROW/i.test(first);
+                            // Planning Table names are often hash ids (e.g. qc2rnv2pht), not PT-…
+                            const looksLikeItemCode = /^[0-9]{6,}/.test(first) || first.includes('-');
+                            const looksLikeRow =
+                                !looksLikeItemCode &&
+                                (/^PT-|^new-|^ROW-|^PTROW/i.test(first) || /^[a-z0-9]{8,14}$/i.test(first));
                             return {
                                 row_name: looksLikeRow ? first : '',
                                 item_code: looksLikeRow ? '' : first,
