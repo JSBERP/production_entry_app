@@ -98,6 +98,7 @@ export async function gsmOpenBundlePackaging(ppId, onSuccess, options = {}) {
 		sprName,
 		gsmMode: true,
 		ppId,
+		fallbackJob: options.fallbackJob || null,
 		onSuccess: (result) => {
 			if (typeof onSuccess === "function") {
 				onSuccess(result, sprName);

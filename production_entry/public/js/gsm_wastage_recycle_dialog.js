@@ -989,7 +989,8 @@ export async function openGsmWastageDialog(opts = {}) {
 	await _openRollWastage(sprRow.spr_name, sprRow, opts);
 }
 
-function _otherWastageEditorHtml(rows, shaftVal) {
+function _otherWastageEditorHtml(rows, shaftVal, wasteProfile) {
+	const slitting = String(wasteProfile || "").toLowerCase() === "slitting";
 	const list = Array.isArray(rows) ? rows : [];
 	const shaft = _esc(shaftVal || "1");
 	const body = list.length
@@ -1029,12 +1030,17 @@ function _otherWastageEditorHtml(rows, shaftVal) {
 		</table>
 	</div>
 	<p style="margin:10px 0 0;color:#64748b;font-size:12px;">${__(
-		"Lamination defaults: WASTE - 012 … 016 and WASTE - 006. Enter quantity and Save — stored as Lamination Other Wastage (not on SPR)."
+		slitting
+			? "Slitting other waste is WASTE - 012 only. Enter quantity and Save — stored as Other Wastage (not on SPR)."
+			: "Lamination defaults: WASTE - 012 … 016 and WASTE - 006. Enter quantity and Save — stored as Lamination Other Wastage (not on SPR)."
 	)}</p>`;
 }
 
 async function _openOtherWastages(sprName, sprRow, opts = {}) {
 	const OW_API = "production_entry.production_planning.lamination_other_wastage_api";
+	const wasteProfile = String(opts.wasteProfile || opts.waste_profile || "lamination").toLowerCase() === "slitting"
+		? "slitting"
+		: "lamination";
 	const ctx = {
 		run_date: opts.runDate || opts.run_date || "",
 		shift: opts.shift || "",
@@ -1042,6 +1048,7 @@ async function _openOtherWastages(sprName, sprRow, opts = {}) {
 		shaft: String(opts.shaft || opts.shaftNo || "1").trim() || "1",
 		gsm_shift_session: opts.shiftSessionId || opts.gsm_shift_session || "",
 		doc_name: "",
+		waste_profile: wasteProfile,
 	};
 	if (!ctx.custom_unit) {
 		frappe.msgprint(__("Select a unit first."));
@@ -1064,6 +1071,7 @@ async function _openOtherWastages(sprName, sprRow, opts = {}) {
 				shaft: ctx.shaft,
 				gsm_shift_session: ctx.gsm_shift_session || undefined,
 				doc_name: ctx.doc_name || undefined,
+				waste_profile: ctx.waste_profile || "lamination",
 			},
 		});
 		const msg = res.message || {};
@@ -1086,8 +1094,10 @@ async function _openOtherWastages(sprName, sprRow, opts = {}) {
 				fieldname: "grid_html",
 				fieldtype: "HTML",
 				options: `<div class="gwm-shell"><div class="gwm-card">
-					<div class="gwm-section-title">${__("Lamination Other Wastages")}</div>
-					<div class="gwm-other-body">${_otherWastageEditorHtml(rows, ctx.shaft)}</div>
+					<div class="gwm-section-title">${__(
+						ctx.waste_profile === "slitting" ? "Slitting Other Wastage" : "Lamination Other Wastages"
+					)}</div>
+					<div class="gwm-other-body">${_otherWastageEditorHtml(rows, ctx.shaft, ctx.waste_profile)}</div>
 				</div></div>`,
 			},
 		],
@@ -1117,6 +1127,7 @@ async function _openOtherWastages(sprName, sprRow, opts = {}) {
 						shaft: ctx.shaft,
 						gsm_shift_session: ctx.gsm_shift_session || undefined,
 						doc_name: ctx.doc_name || undefined,
+						waste_profile: ctx.waste_profile || "lamination",
 						rows: JSON.stringify(updates),
 					},
 				});
@@ -1127,7 +1138,7 @@ async function _openOtherWastages(sprName, sprRow, opts = {}) {
 					message: __("Saved {0}", [ctx.doc_name || __("Other Wastage")]),
 					indicator: "green",
 				});
-				d.$wrapper.find(".gwm-other-body").html(_otherWastageEditorHtml(rows, ctx.shaft));
+				d.$wrapper.find(".gwm-other-body").html(_otherWastageEditorHtml(rows, ctx.shaft, ctx.waste_profile));
 				bindShaftReload();
 			} catch (e) {
 				frappe.msgprint(e.message || __("Failed to save other wastage"));
@@ -1148,7 +1159,7 @@ async function _openOtherWastages(sprName, sprRow, opts = {}) {
 			try {
 				payload = await load(shaftVal);
 				rows = (payload.rows || []).map((x) => ({ ...x }));
-				d.$wrapper.find(".gwm-other-body").html(_otherWastageEditorHtml(rows, ctx.shaft));
+				d.$wrapper.find(".gwm-other-body").html(_otherWastageEditorHtml(rows, ctx.shaft, ctx.waste_profile));
 				bindShaftReload();
 			} catch (e) {
 				console.warn(e);
@@ -1243,9 +1254,12 @@ async function _openRollWastage(sprName, sprRow, opts) {
 	</div>
 	</div>`;
 	const lamMode = !!opts.laminationMode;
+	const slittingWaste = String(opts.wasteProfile || opts.waste_profile || "").toLowerCase() === "slitting";
 	const rollHtml = `<div class="gwm-shell"><p style="margin:0 0 12px;color:#64748b;font-size:13px">${__(
 		lamMode
-			? "Roll waste saves to SPR. Other Waste saves as Lamination Other Wastage (unit/date/shaft) — not on SPR. Running Patty / Recycle are hidden for lamination."
+			? slittingWaste
+				? "Roll waste saves to SPR. Other Waste is WASTE - 012 only (unit/date/shaft) — not on SPR. Running Patty and Recycle are hidden for slitting."
+				: "Roll waste saves to SPR. Other Waste saves as Lamination Other Wastage (unit/date/shaft) — not on SPR. Running Patty / Recycle are hidden for lamination."
 			: "Roll waste saves to SPR immediately. Recycle uses saved patty / roll waste rows."
 	)}</p>
 	${

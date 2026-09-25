@@ -683,8 +683,16 @@ export function openSprBundlePackagingDialog(opts) {
 		freeze_message: __("Loading jobs..."),
 		callback(r) {
 			const cat = r.message || {};
-			const jobs = cat.jobs || [];
+			let jobs = cat.jobs || [];
 			const widthsByJob = cat.widths_by_job || {};
+			if (!jobs.length && opts.fallbackJob && opts.fallbackJob.job_id) {
+				const fb = opts.fallbackJob;
+				jobs = [fb];
+				const jid = String(fb.job_id);
+				if (fb.widths && fb.widths.length && !widthsByJob[jid]) {
+					widthsByJob[jid] = fb.widths;
+				}
+			}
 			openBundleDialog(jobs, widthsByJob, []);
 		},
 	});

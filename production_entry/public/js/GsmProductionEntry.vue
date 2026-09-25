@@ -139,9 +139,9 @@
                 <span v-if="job.quality" class="gpe-spec-chip gpe-spec-quality">{{ job.quality }}</span>
                 <span v-if="job.color" class="gpe-spec-chip gpe-spec-color">{{ job.color }}</span>
               </div>
-              <div v-if="!isLaminationMode" class="gpe-job-combination">{{ job.combination_label || "—" }}</div>
+              <div v-if="!showSpecCard" class="gpe-job-combination">{{ job.combination_label || "—" }}</div>
               <div v-else class="gpe-job-combination">
-                <template v-if="job.width_inch || job.widthLabel">{{ job.width_inch || job.widthLabel }}"</template>
+                <template v-if="jobSpecWidth(job)">{{ jobSpecWidth(job) }}"</template>
                 <template v-else-if="job.combination_label">{{ job.combination_label }}</template>
                 <template v-else>—</template>
               </div>
@@ -154,7 +154,7 @@
                 <span class="gpe-day-target">Job Tgt {{ formatKg(job.job_target_kg) }} Kg</span>
                 <span class="gpe-day-rem">Rem {{ formatKg(job.job_remaining_kg) }} Kg</span>
               </div>
-              <div v-if="!isLaminationMode" class="gpe-dual-meter" :class="{ 'gpe-dual-meter-full': job.quota_full }">
+              <div v-if="!isLaminationMode && !isSlittingEntry" class="gpe-dual-meter" :class="{ 'gpe-dual-meter-full': job.quota_full }">
                 <div class="gpe-meter-col">
                   <span class="gpe-meter-label">Shafts</span>
                   <span class="gpe-meter-frac">
@@ -168,8 +168,11 @@
                   </span>
                 </div>
               </div>
-              <div v-else class="gpe-job-remaining">
+              <div v-else-if="isLaminationMode" class="gpe-job-remaining">
                 Order remaining — produce by rolls after inputs.
+              </div>
+              <div v-else-if="isSlittingEntry" class="gpe-job-remaining">
+                Add Roll Row opens bundle packaging.
               </div>
               <div class="gpe-meter-context">{{ shift }} · {{ formatPlannedDate(runDate) }}</div>
               <div v-if="cint(job.today_rolls) > 0" class="gpe-shift-breakdown">
@@ -284,9 +287,9 @@
                     <span v-if="job.quality" class="gpe-spec-chip gpe-spec-quality">{{ job.quality }}</span>
                     <span v-if="job.color" class="gpe-spec-chip gpe-spec-color">{{ job.color }}</span>
                   </div>
-                  <div v-if="!isLaminationMode" class="gpe-job-combination">{{ job.combination_label || "—" }}</div>
+                  <div v-if="!showSpecCard" class="gpe-job-combination">{{ job.combination_label || "—" }}</div>
                   <div v-else class="gpe-job-combination">
-                    <template v-if="job.width_inch || job.widthLabel">{{ job.width_inch || job.widthLabel }}"</template>
+                    <template v-if="jobSpecWidth(job)">{{ jobSpecWidth(job) }}"</template>
                     <template v-else-if="job.combination_label">{{ job.combination_label }}</template>
                     <template v-else>—</template>
                   </div>
@@ -294,7 +297,7 @@
                     <span class="gpe-day-target">Job Tgt {{ formatKg(job.job_target_kg) }} Kg</span>
                     <span class="gpe-day-rem">Rem {{ formatKg(job.job_remaining_kg) }} Kg</span>
                   </div>
-                  <div class="gpe-dual-meter gpe-dual-meter-done">
+                  <div v-if="!isLaminationMode && !isSlittingEntry" class="gpe-dual-meter gpe-dual-meter-done">
                     <div class="gpe-meter-col">
                       <span class="gpe-meter-label">Shafts</span>
                       <span class="gpe-meter-frac">
@@ -374,6 +377,7 @@
               <label>Unit <input v-model="headerUnit" type="text" readonly /></label>
               <div v-if="(headerUnit || filterUnit) && !isMixingExcluded" class="gpe-wastage-recycle-btns">
                 <button
+                  v-if="!isSlittingEntry"
                   type="button"
                   class="gpe-btn"
                   :disabled="!canOpenMixingSheet"
@@ -395,7 +399,7 @@
                   @click="openWastageDialog"
                 >Wastage</button>
                 <button
-                  v-if="!isLaminationMode"
+                  v-if="!isLaminationMode && !isSlittingEntry"
                   type="button"
                   class="gpe-btn"
                   :disabled="!canOpenWastageRecycle"
@@ -3223,6 +3227,12 @@ function enrichJobCard(job) {
     partyName: meta.partyName,
     quality: job.quality || meta.quality || "",
     color: job.color || meta.color || "",
+    gsm: cint(job.gsm) || cint(meta.gsm) || 0,
+    width_inch: sprFlt(job.width_inch || job.width || meta.width_inch || 0) || null,
+    widthLabel:
+      sprFlt(job.width_inch || job.width || meta.width_inch || 0) > 0
+        ? String(sprFlt(job.width_inch || job.width || meta.width_inch || 0))
+        : job.widthLabel || "",
     planningLineId: meta.planningLineId,
     selectable,
     chip,
@@ -3930,6 +3940,30 @@ const isLaminationMode = computed(() => {
   return isLaminationUnit(headerUnit.value || filterUnit.value);
 });
 
+const isSlittingEntry = computed(() => {
+  return processScopeKey.value === "slitting_only" || BOARD_SLUG.value === "slitting-production-entry";
+});
+
+/** Fabric GSM keeps shaft/combination cards. Every other process shows quality, colour, GSM, and width. */
+const isFabricEntry = computed(() => {
+  const scope = processScopeKey.value;
+  if (scope && scope !== "only_100") return false;
+  const slug = BOARD_SLUG.value;
+  if (slug && slug !== "gsm-production-entry") return false;
+  return true;
+});
+
+const showSpecCard = computed(() => !isFabricEntry.value);
+
+function jobSpecWidth(job) {
+  if (!job) return "";
+  const w = sprFlt(job.width_inch || job.width || 0);
+  if (w > 0) {
+    return Math.abs(w - Math.round(w)) < 0.001 ? String(Math.round(w)) : String(Math.round(w * 1000) / 1000);
+  }
+  return String(job.widthLabel || "").replace(/"$/, "").trim();
+}
+
 const freezeGsmUnit = computed(() => isBoardActionFrozen(gsmBoardAccess.value, "gsm_unit"));
 const freezeGsmDate = computed(() => isBoardActionFrozen(gsmBoardAccess.value, "gsm_date"));
 const freezeGsmShift = computed(() => isBoardActionFrozen(gsmBoardAccess.value, "gsm_shift"));
@@ -3949,9 +3983,9 @@ const jobOrderGroups = computed(() => {
   const map = new Map();
   const allowedPpIds = sidebarAllowedPpIds.value;
 
-  // Lamination entry: ONLY FG order cards from the lamination board (104/107).
-  // Do not show fabric shaft/job-board cards (process 100 combinations).
-  if (isLaminationMode.value) {
+  // Lamination and slitting: order cards (quality, colour, GSM, width), not fabric shaft combinations.
+  // Lamination stays on 104/107. Slitting uses the slitting board rows (103/108/109/110).
+  if (isLaminationMode.value || isSlittingEntry.value) {
     for (const row of ppSubmittedRows.value) {
       if (!row.pp_id || (allowedPpIds.size && !allowedPpIds.has(row.pp_id))) {
         continue;
@@ -3959,14 +3993,14 @@ const jobOrderGroups = computed(() => {
       const orderCode = row.order_code || row.party_code || row.pp_id;
       const key = `${orderCode}::${row.pp_id}`;
       const dayStats = orderDayStatsForPp(row.pp_id);
-      const widthInch = sprFlt(row.width_inch || row.width || 0);
+      const widthInch = sprFlt(row.width_inch || row.width || row.slitting_size || 0);
       const widthLabel =
         widthInch > 0 ? String(widthInch) : _cstr(row.combination || "").trim();
       const gsm =
         cint(row.gsm) || cint(row.fabric_gsm) || cint(row.lam_gsm) || 0;
       const lamProc = _cstr(row.lamination_process || "").trim();
       // Skip any non-lamination / fabric-only chart leftovers
-      if (lamProc && lamProc !== "104" && lamProc !== "107") {
+      if (isLaminationMode.value && lamProc && lamProc !== "104" && lamProc !== "107") {
         continue;
       }
       map.set(key, {
@@ -4014,7 +4048,9 @@ const jobOrderGroups = computed(() => {
               dayStats.dayRemKg ||
               sprFlt(row.remaining_kg) ||
               Math.max(0, sprFlt(row.qty || row.target_kg) - sprFlt(row.actual_production_weight_kgs)),
-            tooltip: "Lamination FG order — select to create SPR",
+            tooltip: isSlittingEntry.value
+              ? "Slitting order — select, create SPR, then add a bundle"
+              : "Lamination FG order — select to create SPR",
           }),
         ],
       });
@@ -4519,8 +4555,8 @@ const canAddRow = computed(() => {
   ) {
     return false;
   }
-  // Lamination: no fabric shaft roll quota — Add Roll prompts for N lines on SPR
-  if (isLaminationMode.value) {
+  // Lamination adds output rolls. Slitting opens bundle packaging. Neither uses fabric shaft quota.
+  if (isLaminationMode.value || isSlittingEntry.value) {
     return true;
   }
   return selectedEntries.value.some((entry) => {
@@ -4586,10 +4622,26 @@ const sprCreatedForSession = computed(() => {
 });
 
 /** SPRs that will be submitted — at least one saved roll in the grid for that pp_id. */
+function isReadyBundleRow(r) {
+  return !!(
+    r &&
+    r.is_bundle_row &&
+    !r.is_wasted &&
+    r.batch_no &&
+    (r.row_locked || r.row_ready_for_print)
+  );
+}
+
 const submitSprList = computed(() => {
   const ppWithRolls = new Set();
   for (const r of rollLines.value) {
-    if (r.is_bundle_row || r.is_wasted) {
+    if (r.is_wasted) {
+      continue;
+    }
+    if (r.is_bundle_row) {
+      if (isReadyBundleRow(r) && r.pp_id) {
+        ppWithRolls.add(r.pp_id);
+      }
       continue;
     }
     if (r.pp_id && r.batch_no && isCompleteGsmRoll(r)) {
@@ -4704,7 +4756,7 @@ function isCompleteGsmRoll(r) {
 const fabricRollLines = computed(() => rollLines.value || []);
 
 const submitConfirmRolls = computed(() =>
-  rollLines.value.filter((r) => isCompleteGsmRoll(r))
+  rollLines.value.filter((r) => isCompleteGsmRoll(r) || isReadyBundleRow(r))
 );
 
 const submitIncompleteRolls = computed(() =>
@@ -5514,7 +5566,8 @@ function openWastageDialog() {
     sessionSprList: wastageRecycleSprList.value,
     rollLines: rollLines.value,
     onRollWasted: handleRollWasted,
-    laminationMode: !!isLaminationMode.value,
+    laminationMode: !!(isLaminationMode.value || isSlittingEntry.value),
+    wasteProfile: isSlittingEntry.value ? "slitting" : "lamination",
     headerUnit: headerUnit.value || filterUnit.value,
     runDate: runDate.value,
     shift: shift.value,
@@ -7699,7 +7752,7 @@ async function fetchOrders() {
   loadingOrders.value = true;
   try {
     rawOrders.value = await fetchColorChartForDate(ordersBrowseDate());
-    if (!isLaminationMode.value) {
+    if (isFabricEntry.value) {
       await fetchPpOrdersSupplement();
     }
     if (!filterUnit.value && headerUnit.value) {
@@ -9318,8 +9371,53 @@ async function addLaminationRollRowsViaSpr() {
   }
 }
 
+async function addSlittingBundleRow() {
+  if (!selectionLocked.value) {
+    frappe.msgprint(__("Confirm and lock your order selection first."));
+    return;
+  }
+  if (!selectedSessionSprList.value.length) {
+    frappe.msgprint(__("Click Create SPRs before adding roll rows."));
+    return;
+  }
+  const target = await resolveLaminationSprTarget();
+  const ppId = target?.pp_id || target?.ppId;
+  if (!ppId) {
+    return;
+  }
+  const entry =
+    selectedEntries.value.find((e) => e.ppId === ppId) || selectedEntries.value[0] || {};
+  const width = sprFlt(entry.width_inch || entry.width || 0);
+  await gsmOpenBundlePackaging(
+    ppId,
+    async (m) => {
+      await handleBundleApplyResult(m, ppId);
+      await fetchOrders();
+    },
+    {
+      fallbackJob: {
+        job_id: entry.jobId || entry.job_id || "1",
+        gsm: entry.gsm || "",
+        quality: entry.quality || "",
+        color: entry.color || "",
+        combination: width > 0 ? String(width) : entry.combination_label || "",
+        widths: width > 0 ? [width] : [],
+      },
+    }
+  );
+}
+
 async function addRollRow() {
   if (addRollInProgress.value) {
+    return;
+  }
+  if (isSlittingEntry.value) {
+    addRollInProgress.value = true;
+    try {
+      await addSlittingBundleRow();
+    } finally {
+      addRollInProgress.value = false;
+    }
     return;
   }
   // Lamination: same as SPR Create Entry — prompt for roll line count, no fabric shaft limit

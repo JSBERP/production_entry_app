@@ -26,6 +26,9 @@ LAMINATION_DEFAULT_WASTE_ITEMS = (
 	"WASTE - 006",
 )
 
+# Slitting other waste is a single item.
+SLITTING_DEFAULT_WASTE_ITEMS = ("WASTE - 012",)
+
 
 def _cstr(val) -> str:
 	return (val or "").strip() if val is not None else ""
@@ -66,9 +69,19 @@ def _item_details(item_code: str) -> dict:
 	}
 
 
-def _default_rows() -> list:
+def _waste_profile(profile) -> str:
+	return "slitting" if _cstr(profile).lower() == "slitting" else "lamination"
+
+
+def _profile_item_codes(profile) -> tuple:
+	if _waste_profile(profile) == "slitting":
+		return SLITTING_DEFAULT_WASTE_ITEMS
+	return LAMINATION_DEFAULT_WASTE_ITEMS
+
+
+def _default_rows(profile=None) -> list:
 	out = []
-	for code in LAMINATION_DEFAULT_WASTE_ITEMS:
+	for code in _profile_item_codes(profile):
 		det = _item_details(code)
 		if not det.get("item_code") or not frappe.db.exists("Item", code):
 			# Still show placeholder so operator sees the expected codes
@@ -184,14 +197,14 @@ def _get_or_create(run_date=None, shift=None, custom_unit=None, shaft=None, gsm_
 	return doc
 
 
-def _ensure_default_items(doc):
-	"""Ensure the six lamination waste items exist as rows (qty preserved if already present)."""
+def _ensure_default_items(doc, profile=None):
+	"""Ensure the profile waste items exist as rows (qty preserved if already present)."""
 	existing = {
 		_cstr(getattr(r, "item_code", None)): r for r in (doc.items or []) if _cstr(getattr(r, "item_code", None))
 	}
 	qty_map = {code: flt(getattr(row, "quantity", None) or 0) for code, row in existing.items()}
 	doc.items = []
-	for raw in _default_rows():
+	for raw in _default_rows(profile):
 		code = raw["item_code"]
 		doc.append(
 			"items",
@@ -212,8 +225,10 @@ def get_lamination_other_wastage(
 	shaft=None,
 	gsm_shift_session=None,
 	doc_name=None,
+	waste_profile=None,
 ):
-	"""Load or preview Other Wastage for lamination (defaults filled)."""
+	"""Load or preview Other Wastage. Lamination uses six items; slitting uses WASTE - 012 only."""
+	profile = _waste_profile(waste_profile)
 	found = _find_doc(
 		run_date=run_date,
 		shift=shift,
@@ -225,9 +240,10 @@ def get_lamination_other_wastage(
 	if found:
 		doc = frappe.get_doc(DOCTYPE, found)
 		# Keep defaults present even on older docs
-		before = len(doc.items or [])
-		_ensure_default_items(doc)
-		if len(doc.items or []) != before:
+		before = [( _cstr(getattr(r, "item_code", None)), flt(getattr(r, "quantity", None) or 0)) for r in (doc.items or [])]
+		_ensure_default_items(doc, profile)
+		after = [( _cstr(getattr(r, "item_code", None)), flt(getattr(r, "quantity", None) or 0)) for r in (doc.items or [])]
+		if after != before:
 			doc.save(ignore_permissions=True)
 		return _doc_payload(doc)
 
@@ -239,7 +255,8 @@ def get_lamination_other_wastage(
 		"custom_unit": _cstr(custom_unit),
 		"shaft": _normalize_shaft(shaft),
 		"gsm_shift_session": _cstr(gsm_shift_session),
-		"rows": _default_rows(),
+		"rows": _default_rows(profile),
+		"waste_profile": profile,
 	}
 
 
@@ -252,8 +269,10 @@ def save_lamination_other_wastage(
 	gsm_shift_session=None,
 	doc_name=None,
 	rows=None,
+	waste_profile=None,
 ):
 	"""Save Other Wastage quantities — standalone DocType, not SPR."""
+	profile = _waste_profile(waste_profile)
 	rows = _parse_rows(rows)
 	doc = _get_or_create(
 		run_date=run_date,
@@ -274,7 +293,7 @@ def save_lamination_other_wastage(
 		qty_by_code[code] = flt(raw.get("quantity") or 0)
 
 	doc.items = []
-	for raw in _default_rows():
+	for raw in _default_rows(profile):
 		code = raw["item_code"]
 		if not frappe.db.exists("Item", code):
 			frappe.throw(_("Item {0} not found. Create the Item before saving.").format(code))
