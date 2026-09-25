@@ -2026,6 +2026,7 @@ const STORAGE_KEY = computed(
 );
 const FABRIC_UNITS = ["Unit 1", "Unit 2", "Unit 3", "Unit 4"];
 const LAMINATION_UNIT = "TNSPL - LAMINATION UNIT";
+const SLITTING_UNASSIGNED_UNIT = "UNASSIGNED SLITTING MACHINE";
 const SLITTING_UNITS = ["JVE - SLITTING MACHINE", "VTP - SLITTING MACHINE"];
 const REWINDING_UNITS = [
   "JSB - L5 REWINDING MACHINE",
@@ -3667,11 +3668,20 @@ function isLaminationUnit(unit) {
   return u.includes("LAMINATION") || u === LAMINATION_UNIT.toUpperCase();
 }
 
+function isSlittingUnassignedUnit(unit) {
+  const u = _cstr(unit).trim().toUpperCase().replace(/\s+/g, " ");
+  if (!u) return false;
+  return u === SLITTING_UNASSIGNED_UNIT.toUpperCase() || (u.includes("UNASSIGNED") && u.includes("SLITTING"));
+}
+
 function isGsmEntryUnit(unit) {
   const n = normalizeGsmUnit(unit);
   if (!n) return false;
   const allowed = pageEntryUnits.value.map((u) => normalizeGsmUnit(u));
-  return allowed.includes(n);
+  if (allowed.includes(n)) return true;
+  // Process 103 stays on the unassigned slitting lane until a machine is pinned.
+  // Those submitted orders still belong on this entry page.
+  return isSlittingEntry.value && isSlittingUnassignedUnit(n);
 }
 
 function normalizeGsmUnit(unit) {
@@ -3821,7 +3831,13 @@ const filteredPpSubmittedRows = computed(() => {
     shiftOpened.value ? headerUnit.value || filterUnit.value : filterUnit.value
   );
   if (unit) {
-    rows = rows.filter((r) => normalizeGsmUnit(r.unit) === unit);
+    rows = rows.filter((r) => {
+      const rowUnit = normalizeGsmUnit(r.unit);
+      if (rowUnit === unit) return true;
+      // Slitting order table keeps process 103 on UNASSIGNED SLITTING MACHINE.
+      // Show that lane on whichever slitting machine the operator has open.
+      return isSlittingEntry.value && SLITTING_UNITS.includes(unit) && isSlittingUnassignedUnit(rowUnit);
+    });
   }
   rows = rows.filter((r) => rowMatchesFilterDate(r));
   return rows;
