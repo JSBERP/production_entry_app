@@ -71,9 +71,10 @@
     <!-- Entry tab -->
     <div v-show="pageTab === 'entry'" class="gpe-layout gpe-layout-entry">
       <aside class="gpe-sidebar gpe-card">
-        <h3>{{ isLaminationMode ? "Lamination Orders" : "Orders & Jobs" }}</h3>
+        <h3>{{ isFlexoEntry ? "Flexo Printing Orders" : isLaminationMode ? "Lamination Orders" : "Orders & Jobs" }}</h3>
         <p class="gpe-hint">
-          <template v-if="isLaminationMode">Order-based entry. Confirm selection, add fabric/BOPP inputs, then output rolls.</template>
+          <template v-if="isFlexoEntry">Flexo printing orders only. Confirm selection, then add roll rows.</template>
+          <template v-else-if="isLaminationMode">Order-based entry. Confirm selection, add fabric/BOPP inputs, then output rolls.</template>
           <template v-else>PP shaft jobs. Confirm selection, then add roll rows.</template>
         </p>
         <div v-if="shiftOpened && selectionLocked && selectedEntries.length" class="gpe-session-panel">
@@ -154,7 +155,7 @@
                 <span class="gpe-day-target">Job Tgt {{ formatKg(job.job_target_kg) }} Kg</span>
                 <span class="gpe-day-rem">Rem {{ formatKg(job.job_remaining_kg) }} Kg</span>
               </div>
-              <div v-if="!isLaminationMode && !isSlittingEntry" class="gpe-dual-meter" :class="{ 'gpe-dual-meter-full': job.quota_full }">
+              <div v-if="!isLaminationMode && !isSlittingEntry && !isFlexoEntry" class="gpe-dual-meter" :class="{ 'gpe-dual-meter-full': job.quota_full }">
                 <div class="gpe-meter-col">
                   <span class="gpe-meter-label">Shafts</span>
                   <span class="gpe-meter-frac">
@@ -167,6 +168,9 @@
                     <em>{{ job.job_rolls_produced }}</em><span>/</span><strong>{{ job.max_rolls }}</strong>
                   </span>
                 </div>
+              </div>
+              <div v-else-if="isFlexoEntry" class="gpe-job-remaining">
+                Flexo order — add roll rows after Create SPR.
               </div>
               <div v-else-if="isLaminationMode" class="gpe-job-remaining">
                 Order remaining — produce by rolls after inputs.
@@ -297,7 +301,7 @@
                     <span class="gpe-day-target">Job Tgt {{ formatKg(job.job_target_kg) }} Kg</span>
                     <span class="gpe-day-rem">Rem {{ formatKg(job.job_remaining_kg) }} Kg</span>
                   </div>
-                  <div v-if="!isLaminationMode && !isSlittingEntry" class="gpe-dual-meter gpe-dual-meter-done">
+                  <div v-if="!isLaminationMode && !isSlittingEntry && !isFlexoEntry" class="gpe-dual-meter gpe-dual-meter-done">
                     <div class="gpe-meter-col">
                       <span class="gpe-meter-label">Shafts</span>
                       <span class="gpe-meter-frac">
@@ -399,7 +403,7 @@
                   @click="openWastageDialog"
                 >Wastage</button>
                 <button
-                  v-if="!isLaminationMode && !isSlittingEntry"
+                  v-if="!isLaminationMode && !isSlittingEntry && !isFlexoEntry"
                   type="button"
                   class="gpe-btn"
                   :disabled="!canOpenWastageRecycle"
@@ -621,7 +625,7 @@
                     min="0"
                     inputmode="numeric"
                     class="gpe-inp gpe-inp-len"
-                    :disabled="row.row_locked || row.is_bundle_row"
+                    :disabled="row.row_locked"
                     @input="onRowEdit(row)"
                   />
                   <span class="gpe-unit-suffix">MTR</span>
@@ -637,7 +641,7 @@
                     inputmode="decimal"
                     autocomplete="off"
                     class="gpe-inp"
-                    :disabled="row.row_locked || row.is_bundle_row"
+                    :disabled="row.row_locked"
                     @input="onGrossWeightInput(row, $event)"
                   />
                 </td>
@@ -669,7 +673,7 @@
                     step="0.001"
                     min="0"
                     class="gpe-inp gpe-inp-narrow"
-                    :disabled="row.row_locked || row.is_bundle_row"
+                    :disabled="row.row_locked"
                     @input="onPolybagInput(row)"
                   />
                 </td>
@@ -680,7 +684,7 @@
                     step="0.01"
                     min="0"
                     class="gpe-inp gpe-inp-narrow"
-                    :disabled="row.row_locked || row.is_bundle_row"
+                    :disabled="row.row_locked"
                     @input="onDiameterInput(row)"
                   />
                 </td>
@@ -689,7 +693,7 @@
                   <select
                     v-model="row.custom_bay"
                     class="gpe-inp gpe-bay-select"
-                    :disabled="row.row_locked || row.is_bundle_row || row.is_wasted"
+                    :disabled="row.row_locked || row.is_wasted"
                     :title="row.custom_bay || (bayOptions.length ? 'Select bay' : 'No bays for this unit')"
                     @focus="onBaySelectFocus"
                   >
@@ -1671,7 +1675,7 @@
         <p>Lock these jobs for roll entry? You can unlock later.</p>
         <table class="gpe-confirm-grid">
           <thead>
-            <tr v-if="isLaminationMode">
+            <tr v-if="isLaminationMode || isFlexoEntry">
               <th>Order</th><th>Job</th><th>Quality</th><th>Color</th><th>GSM</th><th>Width</th><th>Progress</th>
             </tr>
             <tr v-else>
@@ -1682,7 +1686,7 @@
             <tr v-for="line in confirmLines" :key="line.key">
               <td>{{ line.orderCode }}</td>
               <td>{{ line.jobId || line.job_id }}</td>
-              <template v-if="isLaminationMode">
+              <template v-if="isLaminationMode || isFlexoEntry">
                 <td>{{ line.quality || "—" }}</td>
                 <td>{{ line.color || "—" }}</td>
                 <td>{{ confirmLineGsm(line) }}</td>
@@ -1774,7 +1778,7 @@
             class="gpe-btn primary"
             :disabled="addRollWizardStep === 1 ? !addRollJobChoice : addRollWidthChoice == null"
             @click="proceedAddRollWizard"
-          >{{ addRollJobChoice === MIX_WIZARD_KEY || addRollWizardStep === 2 ? "Add row" : "Next" }}</button>
+          >{{ addRollJobChoice === MIX_WIZARD_KEY ? "Add row" : addRollWizardStep === 2 ? "Add row" : "Add rolls" }}</button>
         </div>
       </div>
     </div>
@@ -2034,6 +2038,7 @@ const REWINDING_UNITS = [
   "TSNPL - L3 REWINDING MACHINE",
 ];
 const SHEET_CUTTING_UNITS = ["JVE - SHEET CUTTING MACHINE"];
+const PRINTING_UNASSIGNED_UNIT = "UNASSIGNED PRINTING MACHINE";
 const FLEXO_PRINTING_UNITS = [
   "TT - PRINTING MACHINE 4 COLOUR 1200MM",
   "JVE - PRINTING MACHINE 4 COLOUR 1600MM",
@@ -2407,11 +2412,14 @@ function rollBatchSuffix(batchNo) {
 }
 
 function lifoSortKey(row) {
-  // Mix and fabric share one shift batch series. Newest row (highest batch
-  // suffix or creation_seq) stays at the top — last entry first.
+  // Highest serial stays at the top, serial 1 at the bottom.
+  // Batch suffix is the serial. Do not mix it with creation_seq or the
+  // numbers jump out of order (1, 4, 2, 3).
   const batchSeq = rollBatchSuffix(row?.batch_no);
-  const seq = cint(row?.creation_seq);
-  return Math.max(batchSeq, seq);
+  if (batchSeq > 0) {
+    return batchSeq;
+  }
+  return cint(row?.creation_seq);
 }
 
 /** LIFO: newest roll first (last entry on top). */
@@ -2450,6 +2458,51 @@ function nextCreationSeq() {
   syncCreationSeqFromGrid();
   creationSeq.value += 1;
   return creationSeq.value;
+}
+
+function shaftWidthsForJob(job) {
+  if (!job) return [];
+  const label = _cstr(job.combination || job.combination_label || "");
+  let parts = label
+    .split("+")
+    .map((s) => sprFlt(String(s).replace(/"/g, "").trim()))
+    .filter((w) => w > 0);
+  if (!parts.length) {
+    parts = (job.width_segments || []).map((s) => sprFlt(s.width_inch)).filter((w) => w > 0);
+  }
+  if (!parts.length) return [];
+  const perShaft = Math.max(parts.length, cint(job.rolls_per_shaft) || parts.length);
+  const out = [];
+  while (out.length < perShaft) {
+    out.push(parts[out.length % parts.length]);
+  }
+  return out.slice(0, perShaft);
+}
+
+function shaftWidthsFitQuota(job, widths) {
+  const list = widths || [];
+  if (!list.length) {
+    return { ok: false, reason: "empty" };
+  }
+  const maxRolls = cint(job.max_rolls);
+  if (maxRolls > 0 && effectiveJobRollCount(job) + list.length > maxRolls) {
+    return { ok: false, reason: "job" };
+  }
+  const extra = new Map();
+  for (const w of list) {
+    const key = String(sprFlt(w));
+    extra.set(key, (extra.get(key) || 0) + 1);
+  }
+  for (const [key, n] of extra.entries()) {
+    const widthInch = sprFlt(key);
+    const seg = (job.width_segments || []).find((s) => Math.abs(sprFlt(s.width_inch) - widthInch) < 0.05);
+    const max = cint(seg?.max);
+    const current = effectiveWidthRollCount(job, widthInch);
+    if (max > 0 && current + n > max) {
+      return { ok: false, reason: "width", widthInch, current, max };
+    }
+  }
+  return { ok: true };
 }
 
 function currentShaftNoForJob(job) {
@@ -3266,7 +3319,7 @@ function snapshotFromJob(job) {
     quality: job.quality || meta.quality || "",
     color: job.color || meta.color || "",
     gsm,
-    combination_label: isLaminationMode.value
+    combination_label: isLaminationMode.value || isFlexoEntry.value
       ? widthLabel || job.combination_label || ""
       : job.combination_label || widthLabel,
     width_inch: widthInch || null,
@@ -3370,7 +3423,7 @@ function confirmLineProgress(entry) {
   if (!entry) {
     return "—";
   }
-  if (isLaminationMode.value) {
+  if (isLaminationMode.value || isFlexoEntry.value) {
     const stats = orderDayStatsForPp(entry.ppId);
     const tgt = sprFlt(entry.dayTargetKg || stats.dayTargetKg);
     const rem = sprFlt(entry.dayRemKg != null ? entry.dayRemKg : stats.dayRemKg);
@@ -3668,6 +3721,21 @@ function isLaminationUnit(unit) {
   return u.includes("LAMINATION") || u === LAMINATION_UNIT.toUpperCase();
 }
 
+function isPrintingUnassignedUnit(unit) {
+  const u = _cstr(unit).trim().toUpperCase().replace(/\s+/g, " ");
+  if (!u) return false;
+  return u === PRINTING_UNASSIGNED_UNIT.toUpperCase() || (u.includes("UNASSIGNED") && u.includes("PRINTING"));
+}
+
+function isFlexoPrintingItem(row) {
+  const ic = _cstr(row?.item_code || row?.itemCode || row?.production_item || "").toUpperCase();
+  if (!ic) return true;
+  const is105 = ic.startsWith("105") || /(^|-)105(?!\d)/.test(ic);
+  const is106 = ic.startsWith("106") || /(^|-)106(?!\d)/.test(ic);
+  if (is106 && !is105) return false;
+  return is105 || !is106;
+}
+
 function isSlittingUnassignedUnit(unit) {
   const u = _cstr(unit).trim().toUpperCase().replace(/\s+/g, " ");
   if (!u) return false;
@@ -3681,7 +3749,8 @@ function isGsmEntryUnit(unit) {
   if (allowed.includes(n)) return true;
   // Process 103 stays on the unassigned slitting lane until a machine is pinned.
   // Those submitted orders still belong on this entry page.
-  return isSlittingEntry.value && isSlittingUnassignedUnit(n);
+  if (isSlittingEntry.value && isSlittingUnassignedUnit(n)) return true;
+  return isFlexoEntry.value && isPrintingUnassignedUnit(n);
 }
 
 function normalizeGsmUnit(unit) {
@@ -3836,7 +3905,11 @@ const filteredPpSubmittedRows = computed(() => {
       if (rowUnit === unit) return true;
       // Slitting order table keeps process 103 on UNASSIGNED SLITTING MACHINE.
       // Show that lane on whichever slitting machine the operator has open.
-      return isSlittingEntry.value && SLITTING_UNITS.includes(unit) && isSlittingUnassignedUnit(rowUnit);
+      if (isSlittingEntry.value && SLITTING_UNITS.includes(unit) && isSlittingUnassignedUnit(rowUnit)) {
+        return true;
+      }
+      // Flexo orders stay on UNASSIGNED PRINTING MACHINE until a press is pinned.
+      return isFlexoEntry.value && FLEXO_PRINTING_UNITS.includes(unit) && isPrintingUnassignedUnit(rowUnit);
     });
   }
   rows = rows.filter((r) => rowMatchesFilterDate(r));
@@ -3960,6 +4033,10 @@ const isSlittingEntry = computed(() => {
   return processScopeKey.value === "slitting_only" || BOARD_SLUG.value === "slitting-production-entry";
 });
 
+const isFlexoEntry = computed(() => {
+  return processScopeKey.value === "printing_only" || BOARD_SLUG.value === "flexo-printing-production-entry";
+});
+
 /** Fabric GSM keeps shaft/combination cards. Every other process shows quality, colour, GSM, and width. */
 const isFabricEntry = computed(() => {
   const scope = processScopeKey.value;
@@ -3999,9 +4076,9 @@ const jobOrderGroups = computed(() => {
   const map = new Map();
   const allowedPpIds = sidebarAllowedPpIds.value;
 
-  // Lamination and slitting: order cards (quality, colour, GSM, width), not fabric shaft combinations.
-  // Lamination stays on 104/107. Slitting uses the slitting board rows (103/108/109/110).
-  if (isLaminationMode.value || isSlittingEntry.value) {
+  // Lamination, slitting, and flexo: order cards (quality, colour, GSM, width), not fabric shaft combinations.
+  // Flexo is process 105 only. Laminated printing (106) stays off this page.
+  if (isLaminationMode.value || isSlittingEntry.value || isFlexoEntry.value) {
     for (const row of ppSubmittedRows.value) {
       if (!row.pp_id || (allowedPpIds.size && !allowedPpIds.has(row.pp_id))) {
         continue;
@@ -4016,6 +4093,9 @@ const jobOrderGroups = computed(() => {
         cint(row.gsm) || cint(row.fabric_gsm) || cint(row.lam_gsm) || 0;
       const lamProc = _cstr(row.lamination_process || "").trim();
       // Skip any non-lamination / fabric-only chart leftovers
+      if (isFlexoEntry.value && !isFlexoPrintingItem(row)) {
+        continue;
+      }
       if (isLaminationMode.value && lamProc && lamProc !== "104" && lamProc !== "107") {
         continue;
       }
@@ -4066,7 +4146,9 @@ const jobOrderGroups = computed(() => {
               Math.max(0, sprFlt(row.qty || row.target_kg) - sprFlt(row.actual_production_weight_kgs)),
             tooltip: isSlittingEntry.value
               ? "Slitting order — select, create SPR, then add a bundle"
-              : "Lamination FG order — select to create SPR",
+              : isFlexoEntry.value
+                ? "Flexo printing order — select, create SPR, then add roll rows"
+                : "Lamination FG order — select to create SPR",
           }),
         ],
       });
@@ -4572,7 +4654,7 @@ const canAddRow = computed(() => {
     return false;
   }
   // Lamination adds output rolls. Slitting opens bundle packaging. Neither uses fabric shaft quota.
-  if (isLaminationMode.value || isSlittingEntry.value) {
+  if (isLaminationMode.value || isSlittingEntry.value || isFlexoEntry.value) {
     return true;
   }
   return selectedEntries.value.some((entry) => {
@@ -5582,7 +5664,7 @@ function openWastageDialog() {
     sessionSprList: wastageRecycleSprList.value,
     rollLines: rollLines.value,
     onRollWasted: handleRollWasted,
-    laminationMode: !!(isLaminationMode.value || isSlittingEntry.value),
+    laminationMode: !!(isLaminationMode.value || isSlittingEntry.value || isFlexoEntry.value),
     wasteProfile: isSlittingEntry.value ? "slitting" : "lamination",
     headerUnit: headerUnit.value || filterUnit.value,
     runDate: runDate.value,
@@ -6316,11 +6398,13 @@ async function runQualityCheck(kind) {
       return;
     }
     const jobId = await promptQualityCheckJobId(target.ppId);
+    const gridRolls = qualityGridRollsFor(target.ppId);
     await gsmOpenQualityCheck({
       sprName: target.spr_name,
       ppId: target.ppId,
       kind,
       jobId,
+      gridRolls,
       session: {
         unit: headerUnit.value || filterUnit.value,
         runDate: runDate.value,
@@ -6496,6 +6580,66 @@ function widthDisplay(row) {
 
 async function handleBundleApplyResult(m, ppId) {
   if (!m || m.status !== "ok") {
+    return;
+  }
+  if (m.pending) {
+    const entry =
+      selectedEntries.value.find((e) => e.ppId === ppId) || selectedEntries.value[0] || {};
+    const width = sprFlt(m.segment_width || m.width_inch || entry.width_inch || 0);
+    const bundleSeq = nextCreationSeq();
+    const bundleRow = {
+      _id: `bundle-${Date.now()}-${bundleSeq}`,
+      creation_seq: bundleSeq,
+      is_bundle_row: true,
+      bundle_pending: true,
+      bundle_apply: {
+        job_id: m.job_id || entry.jobId || entry.job_id || "1",
+        width_inch: width,
+        no_of_packaging: m.pack_count || 1,
+        whole_gross_kg: m.whole_gross_kg,
+        produced_length_mtrs: m.produced_length_mtrs,
+        width_mix: m.width_mix || [],
+        pp_id: ppId,
+      },
+      pp_id: ppId,
+      party_code: m.order_code || entry.orderCode || "",
+      job_id: m.job_id || entry.jobId || entry.job_id || "1",
+      quality: m.quality || entry.quality || "",
+      color: m.color || entry.color || "",
+      gsm: m.gsm || entry.gsm || "",
+      width_inch: width,
+      width_label: m.width_label || "",
+      pack_count: m.pack_count || 0,
+      segment_width: width,
+      batch_no: "",
+      roll_no: "",
+      roll_numbers: "",
+      combination: "",
+      meter_roll: m.meter_roll || 0,
+      produced_length_mtrs: sprWholeMtrs(m.produced_length_mtrs) || 0,
+      produced_gsm: 0,
+      net_weight: 0,
+      gross_weight: m.whole_gross_kg != null && m.whole_gross_kg !== "" ? String(m.whole_gross_kg) : "",
+      planned_qty: 0,
+      uom: "Kg",
+      work_order: m.work_order || "",
+      child_roll_batches: [],
+      child_spr_item_names: [],
+      spr_item_name: "",
+      row_locked: 0,
+      row_ready_for_print: 0,
+      custom_diameter_inches: null,
+      custom_bay: "",
+      custom_core_width_mm: pickCoreForFabricWidth(width, ""),
+      core_width_options: coreWidthOptions.value,
+    };
+    rollLines.value = sortRollLinesLifo([bundleRow, ...rollLines.value]);
+    saveStatus.value = __("Enter diameter and bay, then Save Row");
+    scheduleAutosave();
+    frappe.show_alert({
+      message: __("Bundle row added. Enter diameter and bay, then Save Row."),
+      indicator: "blue",
+    });
     return;
   }
   let coreItem = "";
@@ -7233,6 +7377,116 @@ function submitWithTolerance() {
   submitEntry(overrides);
 }
 
+function bundleRowPackReady(row) {
+  const dia = sprFlt(row?.custom_diameter_inches);
+  if (dia <= 0) {
+    frappe.msgprint(__("Enter diameter before Save Row."));
+    return false;
+  }
+  if ((bayOptions.value || []).length && !String(row?.custom_bay || "").trim()) {
+    frappe.msgprint(__("Select a bay before Save Row."));
+    return false;
+  }
+  row.custom_cbm_cubic_meters = sprCalcCbmFromDiameter(row.width_inch, dia);
+  return true;
+}
+
+async function savePendingBundleRow(row) {
+  if (!bundleRowPackReady(row)) {
+    return;
+  }
+  const sprName = sprNameForPp(row.pp_id);
+  if (!sprName) {
+    frappe.msgprint(__("This order has no SPR yet. Click Create SPR, then Save Row."));
+    return;
+  }
+  const apply = row.bundle_apply || {};
+  const dia = sprFlt(row.custom_diameter_inches);
+  saveStatus.value = "Saving bundle…";
+  try {
+    const res = await frappe.call({
+      method: "production_entry.production_planning.unified_production_entry_api.gsm_apply_bundle_packaging",
+      args: {
+        shaft_production_run: sprName,
+        job_id: apply.job_id || row.job_id,
+        width_inch: apply.width_inch || row.width_inch || undefined,
+        no_of_packaging: apply.no_of_packaging || row.pack_count,
+        whole_gross_kg: sprNormalizeGrossWeightInput(row.gross_weight) || apply.whole_gross_kg,
+        produced_length_mtrs: sprWholeMtrs(row.produced_length_mtrs) || apply.produced_length_mtrs,
+        pp_id: row.pp_id,
+        width_mix: JSON.stringify(apply.width_mix || []),
+        custom_diameter_inches: dia,
+        custom_cbm_cubic_meters: row.custom_cbm_cubic_meters,
+        custom_bay: row.custom_bay || "",
+        custom_core_width_mm: row.custom_core_width_mm || "",
+        custom_polybag_kgs: sprFlt(row.custom_polybag_kgs),
+      },
+    });
+    const m = res.message || {};
+    row.bundle_pending = false;
+    row.batch_no = m.bundle_batch_no || row.batch_no;
+    row.child_roll_batches = m.child_roll_batches || [];
+    row.child_spr_item_names = m.child_spr_item_names || [];
+    row.net_weight = m.sticker_bundle_weight_kg || row.net_weight;
+    if (m.whole_gross_kg != null && m.whole_gross_kg !== "") {
+      row.gross_weight = String(m.whole_gross_kg);
+    }
+    row.roll_numbers = m.roll_numbers || row.roll_numbers;
+    row.work_order = m.work_order || row.work_order;
+    row.width_label = m.width_label || row.width_label;
+    row.row_locked = 1;
+    row.row_ready_for_print = 1;
+    scheduleAutosave();
+    saveStatus.value = "Saved to SPR";
+    frappe.show_alert({ message: __("Bundle saved to {0}", [sprName]), indicator: "green" });
+    await loadJobBoard();
+    await fetchOrders();
+  } catch (e) {
+    console.error(e);
+    saveStatus.value = "Save failed";
+    frappe.msgprint(__("Could not save bundle."));
+  }
+}
+
+async function saveExistingBundlePackFields(row) {
+  if (!bundleRowPackReady(row)) {
+    return;
+  }
+  const sprName = sprNameForPp(row.pp_id);
+  if (!sprName) {
+    frappe.msgprint(__("This order has no SPR yet. Click Create SPR, then Save Row."));
+    return;
+  }
+  saveStatus.value = "Saving row…";
+  try {
+    await frappe.call({
+      method: "production_entry.production_planning.unified_production_entry_api.gsm_update_bundle_pack_fields",
+      args: {
+        spr_name: sprName,
+        child_roll_batches: JSON.stringify(row.child_roll_batches || []),
+        bundle_batch_no: row.batch_no || "",
+        job_id: row.job_id || row.job || "",
+        custom_diameter_inches: sprFlt(row.custom_diameter_inches),
+        custom_cbm_cubic_meters: row.custom_cbm_cubic_meters,
+        custom_bay: row.custom_bay || "",
+        produced_length_mtrs: sprWholeMtrs(row.produced_length_mtrs),
+        gross_weight: sprNormalizeGrossWeightInput(row.gross_weight),
+        custom_core_width_mm: row.custom_core_width_mm || "",
+        custom_polybag_kgs: sprFlt(row.custom_polybag_kgs),
+      },
+    });
+    row.row_locked = 1;
+    row.row_ready_for_print = 1;
+    scheduleAutosave();
+    saveStatus.value = "Saved to SPR";
+    frappe.show_alert({ message: __("Row saved to {0}", [sprName]), indicator: "green" });
+  } catch (e) {
+    console.error(e);
+    saveStatus.value = "Save failed";
+    frappe.msgprint(__("Could not save diameter and bay."));
+  }
+}
+
 async function saveRow(row) {
   if (row?.is_wasted || row?.row_readonly) {
     frappe.msgprint(__("Wasted rolls are read-only."));
@@ -7240,6 +7494,14 @@ async function saveRow(row) {
   }
   if (row?.is_mix_roll_row) {
     await saveMixRollRow(row);
+    return;
+  }
+  if (row?.is_bundle_row && row.bundle_pending) {
+    await savePendingBundleRow(row);
+    return;
+  }
+  if (row?.is_bundle_row) {
+    await saveExistingBundlePackFields(row);
     return;
   }
   if (!row?.pp_id) {
@@ -7596,7 +7858,7 @@ function enrichSelectedEntriesFromBoard() {
     const jid = entry.jobId || entry.job_id;
     if (jid && entry.ppId) {
       // Lamination: never overwrite FG selection with fabric shaft job-board rows
-      if (isLaminationMode.value) {
+      if (isLaminationMode.value || isFlexoEntry.value) {
         const meta = orderMetaForPp(entry.ppId);
         const stats = orderDayStatsForPp(entry.ppId);
         const nextGsm = cint(entry.gsm) || cint(meta.gsm) || 0;
@@ -7950,15 +8212,23 @@ async function tryResumeOpenSessionForUnit(options = {}) {
   }
 }
 
+function qualityGridRollsFor(ppId) {
+  const pid = String(ppId || "");
+  const usable = rollLines.value.filter(
+    (r) => !cint(r.is_wasted) && !cint(r.is_bundle_row) && (r.batch_no || cint(r.roll_no))
+  );
+  const forOrder = usable.filter((r) => String(r.pp_id || "") === pid);
+  return forOrder.length ? forOrder : usable;
+}
+
 async function promptQualityCheckJobId(ppId) {
   const fromGrid = [
     ...new Set(
-      rollLines.value
-        .filter((r) => r.pp_id === ppId && !cint(r.is_wasted))
-        .map((r) => String(r.job_id || "").trim())
+      qualityGridRollsFor(ppId)
+        .map((r) => String(r.job_id || r.job || "").trim())
         .filter(Boolean)
     ),
-  ];
+  ].sort((a, b) => Number(a) - Number(b) || String(a).localeCompare(String(b)));
   if (fromGrid.length === 1) {
     return fromGrid[0];
   }
@@ -9128,7 +9398,7 @@ function pickJobAndWidthForRow() {
     addRollJobChoice.value = key;
     const rawJob = jobBoardJobs.value.find((j) => entryKeyJob(j.pp_id, j.job_id) === key);
     // Lamination: no fabric shaft job board — use locked selection width/GSM
-    if (!rawJob && isLaminationMode.value) {
+    if (!rawJob && (isLaminationMode.value || isFlexoEntry.value)) {
       const widthInch = sprFlt(entry.width_inch || entry.width || 0);
       if (widthInch <= 0) {
         frappe.msgprint(__("This order has no width. Check Planning Sheet / color chart."));
@@ -9140,10 +9410,14 @@ function pickJobAndWidthForRow() {
       return Promise.resolve(null);
     }
     const job = withLocalPendingQuota(rawJob);
-    const addable = (job.width_segments || []).filter((s) => s.can_add);
     const maxed = !canJobAddOneMoreRoll(job);
-    if (!maxed && addable.length === 1) {
-      return Promise.resolve({ job: rawJob, widthInch: addable[0].width_inch });
+    if (!maxed) {
+      const shaftWidths = shaftWidthsForJob(job);
+      if (!shaftWidths.length) {
+        frappe.msgprint(__("This job has no shaft widths."));
+        return Promise.resolve(null);
+      }
+      return Promise.resolve({ job: rawJob, shaftWidths });
     }
     addRollWizardSkipJobStep.value = true;
     addRollWizardStep.value = 2;
@@ -9255,6 +9529,25 @@ function proceedAddRollWizard() {
     if (!addRollJobChoice.value) {
       return;
     }
+    if (addRollJobChoice.value !== MIX_WIZARD_KEY) {
+      if (wizardSelectedJobMaxed.value) {
+        return;
+      }
+      const picked = jobBoardJobs.value.find((j) => entryKeyJob(j.pp_id, j.job_id) === addRollJobChoice.value);
+      const widths = shaftWidthsForJob(picked ? withLocalPendingQuota(picked) : null);
+      if (!picked || !widths.length) {
+        frappe.msgprint(__("This job has no shaft widths."));
+        return;
+      }
+      showAddRollWizard.value = false;
+      addRollWizardStep.value = 1;
+      addRollWizardSkipJobStep.value = false;
+      if (pendingAddRowResolve) {
+        pendingAddRowResolve({ job: picked, shaftWidths: widths });
+        pendingAddRowResolve = null;
+      }
+      return;
+    }
     addRollWizardStep.value = 2;
     const segs = wizardWidthSegments.value;
     const pick = segs.find((s) => s.can_add) || segs[0];
@@ -9264,7 +9557,7 @@ function proceedAddRollWizard() {
   const key = addRollJobChoice.value;
   let rawJob = jobBoardJobs.value.find((j) => entryKeyJob(j.pp_id, j.job_id) === key);
   const widthInch = sprFlt(addRollWidthChoice.value);
-  if (!rawJob && isLaminationMode.value && widthInch > 0) {
+  if (!rawJob && (isLaminationMode.value || isFlexoEntry.value) && widthInch > 0) {
     const entry =
       selectedEntries.value.find((e) => (e.key || entryKeyJob(e.ppId, e.jobId || e.job_id)) === key) ||
       selectedEntries.value[0];
@@ -9437,7 +9730,7 @@ async function addRollRow() {
     return;
   }
   // Lamination: same as SPR Create Entry — prompt for roll line count, no fabric shaft limit
-  if (isLaminationMode.value) {
+  if (isLaminationMode.value || isFlexoEntry.value) {
     addRollInProgress.value = true;
     try {
       await addLaminationRollRowsViaSpr();
@@ -9468,7 +9761,13 @@ async function addRollRow() {
     await addMixRollRow();
     return;
   }
-  const { widthInch, job: pickedJob } = pick;
+  const pickedJob = pick.job;
+  const shaftWidths = (pick.shaftWidths && pick.shaftWidths.length
+    ? pick.shaftWidths
+    : pick.widthInch
+      ? [pick.widthInch]
+      : shaftWidthsForJob(pickedJob)
+  ).map((w) => sprFlt(w)).filter((w) => w > 0);
   const rawJob =
     jobBoardJobs.value.find(
       (j) => j.pp_id === pickedJob.pp_id && String(j.job_id) === String(pickedJob.job_id)
@@ -9505,13 +9804,39 @@ async function addRollRow() {
     );
     return;
   }
-  if (!canJobAddWidthRoll(job, widthInch)) {
-    const seg = (job.width_segments || []).find((s) => Math.abs(sprFlt(s.width_inch) - widthInch) < 0.05);
+  if (!shaftWidths.length) {
+    frappe.msgprint(__("This job has no shaft widths."));
+    return;
+  }
+  const shaftFit = shaftWidthsFitQuota(job, shaftWidths);
+  if (!shaftFit.ok && shaftFit.reason === "width") {
     frappe.confirm(
       __("Width {0}\" is full ({1}/{2}) — use Manual Job. Open Manual Job now?", [
-        widthInch,
-        effectiveWidthRollCount(job, widthInch),
-        seg?.max || job.max_rolls,
+        shaftFit.widthInch,
+        shaftFit.current,
+        shaftFit.max || job.max_rolls,
+      ]),
+      async () => {
+        const ctx = toolsContext.value;
+        if (ctx) {
+          await gsmOpenManualJob(
+            ctx.ppId,
+            ctx.planningNames,
+            headerUnit.value,
+            runDate.value,
+            shift.value,
+            () => Promise.all([fetchOrders(), loadJobBoard()])
+          );
+        }
+      }
+    );
+    return;
+  }
+  if (!shaftFit.ok) {
+    frappe.confirm(
+      __("Job roll limit reached ({0}/{1}) — use Manual Job. Open Manual Job now?", [
+        effectiveJobRollCount(job),
+        job.max_rolls,
       ]),
       async () => {
         const ctx = toolsContext.value;
@@ -9536,98 +9861,104 @@ async function addRollRow() {
   }
   lastAddRollJobKey.value = entryKeyJob(job.pp_id, jobId);
   const srcBase = baseLine.source || {};
-  const line = {
-    ...baseLine,
-    ppId: job.pp_id,
-    gsm: job.gsm,
-    width_inch: widthInch,
-    widthLabel: `${widthInch}"`,
-    source: {
-      ...srcBase,
-      pp_id: job.pp_id,
-      gsm: job.gsm,
-      meter_roll: job.meter_roll,
-      meter: job.meter_roll,
-    },
-  };
-  const src = line.source;
   const isManualJob = !!job.is_manual;
-  const [batchInfo, ordLenFromApi, woInfo] = await Promise.all([
-    previewNextBatch(line.ppId),
-    isManualJob || job.meter_roll ? Promise.resolve(0) : resolveOrderLength(line, jobId),
-    isManualJob
-      ? Promise.resolve({
-          work_order: job.work_order || "",
-          production_item: job.item_code || "",
-          production_item_name: job.item_name || "",
-        })
-      : resolveWorkOrder(line, jobId),
-  ]);
-  const ordLen = sprFlt(job.meter_roll) || sprFlt(ordLenFromApi);
-  let batch = batchInfo;
-  let attempts = 0;
-  while (batch?.batch_no && rollLines.value.some((r) => r.batch_no === batch.batch_no) && attempts < 12) {
-    attempts += 1;
-    batch = await previewNextBatch(line.ppId);
-  }
-  if (!batch?.batch_no || rollLines.value.some((r) => r.batch_no === batch.batch_no)) {
+  const shaftNo = currentShaftNoForJob(job);
+  const meta = orderMetaForPp(job.pp_id);
+  const batches = await previewNextBatch(job.pp_id, shaftWidths.length);
+  const batchList = Array.isArray(batches) ? batches : [batches];
+  if (batchList.length < shaftWidths.length || batchList.some((b) => !b?.batch_no)) {
     frappe.msgprint(__("Could not assign a unique batch number. Try again."));
     return;
   }
-  const extras = await fetchRollRowExtras(line, ordLen, jobId);
-  const coreItem = pickCoreForFabricWidth(
-    line.width_inch,
-    extras.custom_core_width_mm || extras.core_size || ""
-  );
-  const itemCode = woInfo?.production_item || src.itemCode || src.item_code;
-  const itemName = woInfo?.production_item_name || src.description || src.item_name || "";
-  const meta = orderMetaForPp(job.pp_id);
-  const rowSeq = nextCreationSeq();
-  const newRow = {
-    _id: `row-${Date.now()}-${rowSeq}`,
-    creation_seq: rowSeq,
-    planning_table_row: line.id,
-    pp_id: line.ppId || src.pp_id,
-    party_code: line.orderCode || resolveOrderCodeForPp(line.ppId || src.pp_id),
-    item_code: itemCode,
-    item_name: itemName,
-    quality: src.quality || meta.quality || "",
-    color: src.color || src.fabric_colour || meta.color || "",
-    gsm: job.gsm,
-    batch_no: batch.batch_no || "",
-    roll_no: batch.roll_no || "",
-    width_inch: line.width_inch,
-    meter_roll: ordLen,
-    produced_length_mtrs: "",
-    produced_gsm: 0,
-    net_weight: 0,
-    gross_weight: "",
-    planned_qty: sprFlt(extras.planned_qty),
-    uom: src.uom || src.stock_uom || "Kg",
-    custom_core_width_mm: coreItem,
-    custom_polybag_kgs: extras.custom_polybag_kgs || 0,
-    custom_diameter_inches: "",
-    custom_cbm_cubic_meters: "",
-    custom_bay: "",
-    work_order: woInfo?.work_order || "",
-    job_id: jobId,
-    custom_no_of_shaft: currentShaftNoForJob(job),
-    row_locked: 0,
-    row_ready_for_print: 0,
-    core_width_options: coreWidthOptions.value,
-  };
-  const newRecalc = sprRecalcRollRow(newRow);
-  newRow.net_weight = newRecalc.net_weight;
-  newRow.produced_gsm = newRecalc.produced_gsm;
-  newRow.planned_qty = newRecalc.planned_qty;
-  rollLines.value = sortRollLinesLifo([newRow, ...rollLines.value]);
+  const created = [];
+  for (let i = 0; i < shaftWidths.length; i += 1) {
+    const widthInch = shaftWidths[i];
+    const line = {
+      ...baseLine,
+      ppId: job.pp_id,
+      gsm: job.gsm,
+      width_inch: widthInch,
+      widthLabel: `${widthInch}"`,
+      source: {
+        ...srcBase,
+        pp_id: job.pp_id,
+        gsm: job.gsm,
+        meter_roll: job.meter_roll,
+        meter: job.meter_roll,
+      },
+    };
+    const src = line.source;
+    const [ordLenFromApi, woInfo] = await Promise.all([
+      isManualJob || job.meter_roll ? Promise.resolve(0) : resolveOrderLength(line, jobId),
+      isManualJob
+        ? Promise.resolve({
+            work_order: job.work_order || "",
+            production_item: job.item_code || "",
+            production_item_name: job.item_name || "",
+          })
+        : resolveWorkOrder(line, jobId),
+    ]);
+    const ordLen = sprFlt(job.meter_roll) || sprFlt(ordLenFromApi);
+    const extras = await fetchRollRowExtras(line, ordLen, jobId);
+    const coreItem = pickCoreForFabricWidth(
+      line.width_inch,
+      extras.custom_core_width_mm || extras.core_size || ""
+    );
+    const itemCode = woInfo?.production_item || src.itemCode || src.item_code;
+    const itemName = woInfo?.production_item_name || src.description || src.item_name || "";
+    const batch = batchList[i];
+    const rowSeq = nextCreationSeq();
+    const newRow = {
+      _id: `row-${Date.now()}-${rowSeq}`,
+      creation_seq: rowSeq,
+      planning_table_row: line.id,
+      pp_id: line.ppId || src.pp_id,
+      party_code: line.orderCode || resolveOrderCodeForPp(line.ppId || src.pp_id),
+      item_code: itemCode,
+      item_name: itemName,
+      quality: src.quality || meta.quality || "",
+      color: src.color || src.fabric_colour || meta.color || "",
+      gsm: job.gsm,
+      batch_no: batch.batch_no || "",
+      roll_no: batch.roll_no || "",
+      width_inch: line.width_inch,
+      meter_roll: ordLen,
+      produced_length_mtrs: "",
+      produced_gsm: 0,
+      net_weight: 0,
+      gross_weight: "",
+      planned_qty: sprFlt(extras.planned_qty),
+      uom: src.uom || src.stock_uom || "Kg",
+      custom_core_width_mm: coreItem,
+      custom_polybag_kgs: extras.custom_polybag_kgs || 0,
+      custom_diameter_inches: "",
+      custom_cbm_cubic_meters: "",
+      custom_bay: "",
+      work_order: woInfo?.work_order || "",
+      job_id: jobId,
+      custom_no_of_shaft: shaftNo,
+      row_locked: 0,
+      row_ready_for_print: 0,
+      core_width_options: coreWidthOptions.value,
+    };
+    const newRecalc = sprRecalcRollRow(newRow);
+    newRow.net_weight = newRecalc.net_weight;
+    newRow.produced_gsm = newRecalc.produced_gsm;
+    newRow.planned_qty = newRecalc.planned_qty;
+    created.push(newRow);
+  }
+  rollLines.value = sortRollLinesLifo([...created, ...rollLines.value]);
   scheduleAutosave();
+  frappe.show_alert({
+    message: __("Added {0} roll row(s) for this shaft.", [created.length]),
+    indicator: "green",
+  });
   } finally {
     addRollInProgress.value = false;
   }
 }
 
-async function previewNextBatch(ppId) {
+async function previewNextBatch(ppId, count = 1) {
   const gsmPrefix = _cstr(seriesPrefix.value || shiftBatchPrefix.value);
   const gsmMode = shiftOpened.value && !!gsmPrefix;
   syncBatchCounterFromGrid();
@@ -9643,7 +9974,7 @@ async function previewNextBatch(ppId) {
           "production_entry.production_planning.doctype.shaft_production_run.shaft_production_run.get_next_spr_batch_numbers",
         args: {
           shaft_production_run: sprName,
-          count: 1,
+          count: Math.max(1, cint(count)),
           client_max_roll: maxRollSuffix.value,
           run_date: runDate.value,
           custom_unit: headerUnit.value,
@@ -9653,11 +9984,16 @@ async function previewNextBatch(ppId) {
           ...gsmBatchArgs,
         },
       });
-      const row = (res.message || [])[0];
-      if (row?.batch_no) {
-        reserveBatchNo(row.batch_no, row.roll_no);
+      const rows = res.message || [];
+      for (const row of rows) {
+        if (row?.batch_no) {
+          reserveBatchNo(row.batch_no, row.roll_no);
+        }
       }
-      return row || { batch_no: "", roll_no: "" };
+      if (cint(count) > 1) {
+        return rows;
+      }
+      return rows[0] || { batch_no: "", roll_no: "" };
     } catch (e) {
       console.warn("get_next_spr_batch_numbers", e);
     }
@@ -9668,7 +10004,7 @@ async function previewNextBatch(ppId) {
       unit: headerUnit.value,
       run_date: runDate.value,
       shift: shift.value,
-      count: 1,
+      count: Math.max(1, cint(count)),
       client_max_roll: maxRollSuffix.value,
       client_series_prefix: gsmPrefix || undefined,
       existing_batches: JSON.stringify(existing),
@@ -9676,13 +10012,18 @@ async function previewNextBatch(ppId) {
       ...gsmBatchArgs,
     },
   });
-  const row = (res.message || [])[0];
-  if (row?.batch_no) {
-    reserveBatchNo(row.batch_no, row.roll_no);
-  } else if (row?.series_prefix) {
-    seriesPrefix.value = row.series_prefix;
+  const rows = res.message || [];
+  for (const row of rows) {
+    if (row?.batch_no) {
+      reserveBatchNo(row.batch_no, row.roll_no);
+    } else if (row?.series_prefix) {
+      seriesPrefix.value = row.series_prefix;
+    }
   }
-  return row || { batch_no: "", roll_no: "" };
+  if (cint(count) > 1) {
+    return rows;
+  }
+  return rows[0] || { batch_no: "", roll_no: "" };
 }
 
 function _removeRowBatchOptions() {

@@ -1936,9 +1936,47 @@ def _despatch_find_scan_match(lines, barcode, unscanned_only=False):
 	return None, []
 
 
+def _zero_despatch_batch_on_delivery_notes(da, batch_no):
+	"""Set this roll's qty to 0 on draft Delivery Notes. Keep the item row."""
+	batch_no = _cstr(batch_no).strip()
+	if not batch_no:
+		return
+	names = _sync_despatch_delivery_notes(da, persist=False) or []
+	for dn_name in names:
+		if not dn_name or not frappe.db.exists("Delivery Note", dn_name):
+			continue
+		dn = frappe.get_doc("Delivery Note", dn_name)
+		if cint(dn.docstatus) != 0:
+			continue
+		changed = False
+		for item in dn.items or []:
+			bundle_name = _cstr(getattr(item, "serial_and_batch_bundle", None) or "")
+			removed_qty = 0.0
+			if bundle_name and frappe.db.exists("Serial and Batch Bundle", bundle_name):
+				bundle = frappe.get_doc("Serial and Batch Bundle", bundle_name)
+				for entry in bundle.entries or []:
+					if _cstr(entry.batch_no) != batch_no:
+						continue
+					removed_qty += flt(entry.qty)
+					entry.qty = 0
+					changed = True
+				if changed:
+					bundle.save(ignore_permissions=True)
+			elif _cstr(getattr(item, "batch_no", None) or "") == batch_no:
+				removed_qty = flt(item.qty)
+				item.qty = 0
+				changed = True
+			if removed_qty > 0 and flt(item.qty) > 0:
+				item.qty = max(flt(item.qty) - removed_qty, 0)
+				changed = True
+		if changed:
+			dn.flags.ignore_validate = True
+			dn.save(ignore_permissions=True)
+
+
 @frappe.whitelist()
-def record_despatch_club_scan(name=None, barcode=None):
-	"""Mark one approved batch as scanned (order-by-order for club cards)."""
+def record_despatch_club_scan(name=None, barcode=None, confirm_unscan=0):
+	"""Mark one approved batch as scanned. A second scan can set scanned qty back to 0."""
 	if not name or not frappe.db.exists("Despatch Approval", name):
 		frappe.throw(_("Despatch Approval not found."))
 	bc = _cstr(barcode).strip()
@@ -1950,6 +1988,35 @@ def record_despatch_club_scan(name=None, barcode=None):
 	da = frappe.get_doc("Despatch Approval", name)
 	if da.status != "Approved":
 		frappe.throw(_("Despatch must be Approved before scanning."))
+	confirm_unscan = cint(confirm_unscan)
+
+	found, ambiguous = _despatch_find_scan_match(list(da.lines or []), bc)
+	if not found and ambiguous:
+		frappe.throw(
+			_("Batch {0} has {1} rolls. Scan the full roll number (e.g. {2}).").format(
+				bc, len(ambiguous), _cstr(ambiguous[0].batch_no)
+			)
+		)
+	if found and cint(getattr(found, "custom_scanned", None) or 0):
+		batch = _cstr(found.batch_no) or bc
+		if not confirm_unscan:
+			return {
+				"ok": True,
+				"ask_unscan": True,
+				"duplicate": True,
+				"batch_no": batch,
+				"party_code": _cstr(found.party_code),
+				"message": _("Roll {0} already scanned.").format(batch),
+			}
+		found.custom_scanned = 0
+		da.save(ignore_permissions=True)
+		_zero_despatch_batch_on_delivery_notes(da, batch)
+		frappe.db.commit()
+		detail = get_despatch_approval_club_detail(name)
+		detail["batch_no"] = batch
+		detail["unscanned"] = True
+		detail["message"] = _("Scanned qty for {0} set to 0.").format(batch)
+		return detail
 
 	# Determine active order (first incomplete by load order)
 	orders = {}
@@ -1983,17 +2050,6 @@ def record_despatch_club_scan(name=None, barcode=None):
 		)
 
 	if not match:
-		# Same roll already scanned for this order?
-		done, _amb = _despatch_find_scan_match(active_lines, bc)
-		if done:
-			return {
-				"ok": True,
-				"duplicate": True,
-				"batch_no": _cstr(done.batch_no) or bc,
-				"party_code": active_pc,
-				"message": _("Roll {0} already scanned.").format(_cstr(done.batch_no) or bc),
-			}
-		# Wrong order / unknown roll
 		for ln in da.lines or []:
 			if _despatch_roll_scan_equal(_cstr(ln.batch_no), bc):
 				frappe.throw(
@@ -2029,15 +2085,26 @@ def create_draft_delivery_notes_from_despatch(name=None):
 
 	club = _cstr(getattr(da, "custom_clubbing_sheet", None) or "")
 	if club and _has_dal_scan_field():
-		unscanned = [ln for ln in (da.lines or []) if not cint(getattr(ln, "custom_scanned", None) or 0)]
-		if unscanned:
-			frappe.throw(_("Scan all rolls before creating Delivery Notes ({0} remaining).").format(len(unscanned)))
+		scanned = [ln for ln in (da.lines or []) if cint(getattr(ln, "custom_scanned", None) or 0)]
+		if not scanned:
+			frappe.throw(_("Scan at least one roll before creating Delivery Notes."))
+		# Partial despatch: the Delivery Note gets scanned rolls only. Unscanned lines stay.
 
 	from production_entry.production_planning.despatch_delivery import (
 		create_draft_delivery_notes_by_order,
 	)
 
-	names = create_draft_delivery_notes_by_order(da)
+	dn_source = da
+	if _has_dal_scan_field():
+		scanned_lines = [ln for ln in (da.lines or []) if cint(getattr(ln, "custom_scanned", None) or 0)]
+		dn_source = frappe.copy_doc(da)
+		dn_source.set("lines", [])
+		for ln in scanned_lines:
+			row = ln.as_dict()
+			for key in ("name", "parent", "parentfield", "parenttype", "idx"):
+				row.pop(key, None)
+			dn_source.append("lines", row)
+	names = create_draft_delivery_notes_by_order(dn_source)
 	if not names:
 		frappe.throw(_("No Delivery Notes created."))
 

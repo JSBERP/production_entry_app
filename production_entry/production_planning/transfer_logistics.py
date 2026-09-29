@@ -2590,8 +2590,8 @@ def _find_transfer_ste_row_for_barcode(se, barcode):
 
 
 @frappe.whitelist()
-def record_transfer_barcode_scan(stock_entry, barcode):
-	"""Material Transfer: scan marks full approved batch weight as scanned; never changes approved qty."""
+def record_transfer_barcode_scan(stock_entry, barcode, confirm_unscan=0):
+	"""Material Transfer: first scan marks the roll. Second scan can set scanned qty to 0."""
 	barcode = (barcode or "").strip()
 	if not barcode:
 		return {"ok": False, "error": _("No barcode provided")}
@@ -2615,7 +2615,24 @@ def record_transfer_barcode_scan(stock_entry, barcode):
 		return {"ok": False, "error": _("Batch {0} is not in the approved transfer list").format(barcode)}
 
 	approved_qty = flt(match.qty)
-	new_scanned = approved_qty if approved_qty > 0 else 0
+	current_scanned = max(
+		flt(match.get("scanned_qty") or 0),
+		flt(match.get("custom_scanned_qty") or 0),
+	)
+	batch_label = (match.batch_no or "").strip() or barcode
+	if current_scanned > 0 and not cint(confirm_unscan):
+		return {
+			"ok": True,
+			"ask_unscan": True,
+			"row_name": match.name,
+			"idx": match.idx,
+			"scanned_qty": current_scanned,
+			"qty": approved_qty,
+			"batch_no": batch_label,
+			"item_code": match.item_code,
+			"message": _("Roll {0} already scanned.").format(batch_label),
+		}
+	new_scanned = 0 if cint(confirm_unscan) else (approved_qty if approved_qty > 0 else 0)
 
 	updates = {}
 	if has_scanned:
@@ -2758,14 +2775,19 @@ def stock_entry_validate_logistics_scan(doc, method=None):
 				row.custom_scanned_qty = qty
 			continue
 		if qty > scanned + 0.01:
-			pending.append(row.item_code)
-	if pending:
+			pending.append(row)
+	scanned_rows = [row for row in (doc.items or []) if max(flt(row.get("scanned_qty") or 0), flt(row.get("custom_scanned_qty") or 0)) > 0]
+	if not scanned_rows:
 		frappe.throw(
-			_("You must scan all approved rolls before submit. Missing scan for: {0}").format(
-				", ".join(sorted(set(pending)))
-			),
+			_("Scan at least one roll before submit."),
 			title=_("Scan validation"),
 		)
+	# Deliver scanned rolls only. Unscanned rows stay off this submit; the approval line is unchanged.
+	if pending:
+		doc.items = scanned_rows
+		for row in doc.items:
+			scanned = max(flt(row.get("scanned_qty") or 0), flt(row.get("custom_scanned_qty") or 0))
+			row.qty = scanned
 
 
 @frappe.whitelist()

@@ -140,7 +140,8 @@ for pt in pt_items:
 
 # ========== SAVE EVERYTHING ==========
 ps.planning_status = "Finalized"
-ps.order_sheet = ", ".join(sorted(set(all_pp_list)))
+# order_sheet is Link → Production Plan (single). A CSV of colour plans breaks save and planned_date.
+ps.order_sheet = None
 ps.save(ignore_permissions=True)
 
 frappe.db.commit()

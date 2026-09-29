@@ -954,17 +954,24 @@ async function _bindWastagePrint($wrapper, sprName, tableField, rows) {
 	});
 }
 
-function _rollsForSpr(rollLines, sprRow) {
+function _rollsForSpr(rollLines, sprRow, opts = {}) {
 	const ppId = sprRow.pp_id;
+	const slitting = String(opts.wasteProfile || opts.waste_profile || "").toLowerCase() === "slitting";
 	const seen = new Set();
 	const out = [];
 	for (const r of rollLines || []) {
+		const savedBundle =
+			slitting &&
+			r.is_bundle_row &&
+			!r.bundle_pending &&
+			(r.row_locked || (r.child_roll_batches || []).length);
 		if (
 			r.pp_id !== ppId ||
 			r.is_wasted ||
-			r.is_bundle_row ||
+			r.bundle_pending ||
+			(!slitting && r.is_bundle_row) ||
 			!r.batch_no ||
-			!(r.row_locked || r.spr_item_name)
+			!(r.row_locked || r.spr_item_name || savedBundle)
 		) {
 			continue;
 		}
@@ -1214,7 +1221,7 @@ async function _openRollWastage(sprName, sprRow, opts) {
 	const wasteTable = _rollWasteTable(ctx);
 	const wasteRows = _uniqueRollWasteRows(wasteTable.rows || []);
 	const rollWasteCols = _apiColsToDesk(wasteTable.columns, DESK_ROLL_WASTE_COLS);
-	const rolls = _rollsForSpr(opts.rollLines, sprRow);
+	const rolls = _rollsForSpr(opts.rollLines, sprRow, opts);
 	const selectRollHtml = rolls.length
 		? `<div class="gwm-card">
 			<div class="gwm-section-title">${__("Select rolls to mark as waste")}</div>

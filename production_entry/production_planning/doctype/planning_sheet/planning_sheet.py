@@ -86,9 +86,55 @@ def get_default_bom_for_item(item_code, company=None):
 
 # Class name must equal DocType name with spaces removed (Frappe get_controller), e.g. "Planning sheet" -> Planningsheet.
 class Planningsheet(Document):
+    def _sanitize_order_sheet_link_values(self):
+        """``order_sheet`` is Link → Production Plan (single). Legacy Sync wrote CSV of all PPs
+        on the header, which breaks Frappe link validation on every save (e.g. setting planned_date).
+        Keep one valid PP or clear; per-row Order Sheets on the board remain the source of truth.
+        """
+        def _one_valid_pp(raw):
+            s = str(raw or "").strip()
+            if not s:
+                return ""
+            # CSV / multi — pick first existing Production Plan name
+            parts = [p.strip() for p in s.replace(";", ",").split(",") if p and p.strip()]
+            if not parts:
+                return ""
+            if len(parts) == 1 and frappe.db.exists("Production Plan", parts[0]):
+                return parts[0]
+            for p in parts:
+                if frappe.db.exists("Production Plan", p):
+                    return p
+            return ""
+
+        def _assign(doc, value):
+            cleaned = value or None
+            if hasattr(doc, "set"):
+                doc.set("order_sheet", cleaned)
+            else:
+                doc.order_sheet = cleaned
+
+        if self.meta.has_field("order_sheet"):
+            # Header is one link. A comma list of colour plans is not a document name.
+            raw = str(self.get("order_sheet") or "").strip()
+            if "," in raw or ";" in raw:
+                _assign(self, None)
+            else:
+                _assign(self, _one_valid_pp(raw) or None)
+
+        for table_key in ("items", "planned_items"):
+            for row in self.get(table_key) or []:
+                if not hasattr(row, "order_sheet"):
+                    continue
+                raw = str(row.get("order_sheet") or "").strip() if hasattr(row, "get") else str(getattr(row, "order_sheet", None) or "").strip()
+                if not raw:
+                    continue
+                if "," in raw or ";" in raw or not frappe.db.exists("Production Plan", raw):
+                    _assign(row, _one_valid_pp(raw) or None)
+
     def _validate_links(self):
         """Run before Document's link check: Frappe calls _validate_links() before validate()/hooks."""
-        if not self.flags.get("ignore_links") and self._action != "cancel":
+        if not self.flags.get("ignore_links") and getattr(self, "_action", None) != "cancel":
+            self._sanitize_order_sheet_link_values()
             self._fix_planned_items_source_item_links()
             # Whites → UNASSIGNED; colors → Unit 1–4 by width before Select normalization.
             self._recompute_line_units_from_width_and_color()
@@ -689,6 +735,10 @@ class Planningsheet(Document):
 
             row.source_item = None
     
+    def before_validate(self):
+        """Clear a comma-separated Order Sheet before Frappe's link check."""
+        self._sanitize_order_sheet_link_values()
+
     def before_save(self):
         """Allocate unit before saving"""
         if not self.allocated_unit:

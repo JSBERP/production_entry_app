@@ -330,7 +330,7 @@
                       v-if="!da.has_draft_dns && !da.delivery_notes?.length && da.dn_docstatus < 1"
                       type="button"
                       class="lk-dn-btn"
-                      :disabled="!da.scan_complete"
+                      :disabled="!!da.clubbing_sheet && !(da.scanned_total > 0)"
                       @click="createClubDraftDns(da)"
                     >
                       Create Delivery Notes
@@ -1056,6 +1056,26 @@ async function submitClubScan(da, forcedBarcode) {
     });
     const msg = r.message || {};
     clubScanInput.value = { ...clubScanInput.value, [da.name]: "" };
+    if (msg.ask_unscan && msg.batch_no) {
+      const batch = msg.batch_no;
+      frappe.confirm(
+        __("Remove {0} rolls?", [batch]),
+        async () => {
+          await frappe.call({
+            method: `${DESPATCH_API}.record_despatch_club_scan`,
+            args: { name: da.name, barcode: batch, confirm_unscan: 1 },
+          });
+          frappe.show_alert({
+            message: __("Scanned qty for {0} set to 0", [batch]),
+            indicator: "orange",
+          });
+          await loadDespatchCards();
+          focusClubScanInput(da);
+        },
+        () => focusClubScanInput(da)
+      );
+      return;
+    }
     frappe.show_alert({
       message: msg.message || __("Scanned"),
       indicator: msg.duplicate ? "orange" : "green",

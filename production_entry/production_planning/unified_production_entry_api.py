@@ -31,7 +31,6 @@ from production_entry.production_planning.doctype.shaft_production_run.shaft_pro
 	resolve_label_from_pp_doc,
 	resolve_label_from_planning_sheet_doc,
 	normalize_label_template_link,
-	get_label_template_print_spec,
 	save_gsm_roll_line_to_spr,
 	spr_doc_is_mix_roll,
 	spr_get_tolerance_violations,
@@ -4597,10 +4596,112 @@ def _gsm_apply_tolerance_override(spr_name: str, reason: str, approved: int):
 	spr.save(ignore_permissions=True)
 
 
+def _gsm_stamp_roll_job(spr_name, roll_payload):
+	"""Keep Shaft Production Run Item.job equal to the GSM grid job.
+
+	Unit 1 rolls were saved with an empty or shaft-index job, so Quality Check
+	listed shaft jobs 1, 2, 3 and then reported no rolls for the job on the grid.
+	"""
+	payload = _parse_json_arg(roll_payload, {})
+	if not isinstance(payload, dict):
+		return
+	job_id = _cstr(payload.get("job_id") or payload.get("job")).strip()
+	batch_no = _cstr(payload.get("batch_no")).strip()
+	if not job_id or not batch_no or not frappe.db.has_column("Shaft Production Run Item", "job"):
+		return
+	rows = frappe.get_all(
+		"Shaft Production Run Item",
+		filters={"parent": spr_name, "batch_no": batch_no},
+		fields=["name", "job"],
+		limit=20,
+	)
+	for row in rows:
+		if _cstr(row.get("job")).strip() == job_id:
+			continue
+		frappe.db.set_value("Shaft Production Run Item", row.name, "job", job_id, update_modified=False)
+
+
 @frappe.whitelist(methods=["GET", "POST"])
 def save_gsm_roll_line(spr_name, roll_payload, shift=None):
 	"""GSM real-time Save Row — thin wrapper for Vue."""
-	return save_gsm_roll_line_to_spr(spr_name, roll_payload, shift=shift)
+	result = save_gsm_roll_line_to_spr(spr_name, roll_payload, shift=shift)
+	try:
+		_gsm_stamp_roll_job(spr_name, roll_payload)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "gsm stamp roll job")
+	return result
+
+
+_LABEL_TEMPLATE_FLAG_FIELDS = (
+	"show_company",
+	"show_company_name",
+	"show_process",
+	"show_email",
+	"show_company_email",
+	"show_quality",
+	"show_customer",
+	"show_customer_name",
+	"show_gsm",
+	"show_color",
+	"show_length",
+	"show_width",
+	"show_gw",
+	"show_nw",
+	"show_sheet_size",
+	"show_total_sheets",
+	"show_roll_no",
+	"show_order_code",
+	"show_batch",
+	"show_barcode",
+	"entered_by",
+	"despatch_by",
+)
+
+
+def _label_template_size_inches(doc) -> tuple[float, float]:
+	size = _cstr(doc.get("label_size") or "4x4").lower().replace(" ", "")
+	known = {"4x4": (4, 4), "4x6": (4, 6), "6x4": (6, 4), "4x2": (4, 2)}
+	if size in known:
+		return known[size]
+	w = flt(doc.get("custom_width_in") or doc.get("width_in") or 4) or 4
+	h = flt(doc.get("custom_height_in") or doc.get("height_in") or 4) or 4
+	return w, h
+
+
+@frappe.whitelist(methods=["GET", "POST"])
+def get_label_template_print_spec(name=None):
+	"""Field flags and size from Label Template. Print layout is not hardcoded here."""
+	raw = _cstr(name).strip()
+	if not raw or not frappe.db.exists("DocType", "Label Template"):
+		return {"from_template": 0}
+	link = normalize_label_template_link(raw) or raw
+	if not frappe.db.exists("Label Template", link):
+		return {"from_template": 0, "name": raw}
+	doc = frappe.get_doc("Label Template", link)
+	meta = frappe.get_meta("Label Template")
+	fields = {}
+	for fn in _LABEL_TEMPLATE_FLAG_FIELDS:
+		if meta.has_field(fn):
+			fields[fn] = cint(doc.get(fn))
+	# Aliases the sticker renderer already understands
+	if "show_company" not in fields and fields.get("show_company_name"):
+		fields["show_company"] = fields["show_company_name"]
+	if "show_email" not in fields and fields.get("show_company_email"):
+		fields["show_email"] = fields["show_company_email"]
+	width_in, height_in = _label_template_size_inches(doc)
+	fields["width_in"] = width_in
+	fields["height_in"] = height_in
+	base = _cstr(doc.get("base_template") or doc.get("label_name") or doc.name)
+	return {
+		"from_template": 1,
+		"name": doc.name,
+		"label_name": _cstr(doc.get("label_name") or doc.name),
+		"base_template": base,
+		"label_size": _cstr(doc.get("label_size") or ""),
+		"width_in": width_in,
+		"height_in": height_in,
+		"fields": fields,
+	}
 
 
 @frappe.whitelist(methods=["GET", "POST"])

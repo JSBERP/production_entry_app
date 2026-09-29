@@ -619,6 +619,34 @@ def spr_doc_is_lamination(doc) -> bool:
 	return _pp_has_lamination_work_order(pp)
 
 
+def spr_doc_is_slitting(doc) -> bool:
+	"""Slitting SPR adds bundle rows with no fabric shaft / roll-line cap."""
+	if not doc:
+		return False
+	if cint(getattr(doc, "custom_is_slitting", 0) or 0):
+		return True
+	unit = _cstr(getattr(doc, "custom_unit", None) or "").strip()
+	return unit in (SLITTING_UNIT, SLITTING_UNIT_VTP, SLITTING_UNASSIGNED_UNIT)
+
+
+_FLEXO_PRINTING_UNITS = (
+	PRINTING_UNIT_2_COLOUR,
+	PRINTING_UNIT_4_COLOUR,
+	PRINTING_UNIT_TT,
+	PRINTING_UNASSIGNED_UNIT,
+)
+
+
+def spr_doc_is_flexo(doc) -> bool:
+	"""Flexo printing SPR (process 105 / flexo press). No fabric shaft roll cap."""
+	if not doc:
+		return False
+	unit = _cstr(getattr(doc, "custom_unit", None) or "").strip()
+	if unit in _FLEXO_PRINTING_UNITS:
+		return True
+	return spr_fg_item_process_code(_spr_first_roll_item_code(doc)) == "105"
+
+
 def _fabric_gsm_from_item_name(item_name: str) -> int:
 	"""Parse Fabric GSM from item name by finding the F-<number> pattern (e.g. 'F-60' or 'F - 60' ΓåÆ 60)."""
 	if not item_name:
@@ -11161,6 +11189,9 @@ def _gsm_enforce_job_roll_quota_on_add(
 	"""Block new GSM roll lines past PP job max rolls / per-width caps."""
 	if _gsm_find_item_row_by_batch(spr, batch_no):
 		return
+	# Slitting bundle rows are not fabric shaft jobs — same open add as lamination.
+	if spr_doc_is_slitting(spr) or spr_doc_is_flexo(spr):
+		return
 	# Mix SPRs have no Production Plan. Job id is always "1", so a unit-wide
 	# job-1 count picks up fabric rolls (e.g. six 21" lines) and blocks the first mix save.
 	if spr_doc_is_mix_roll(spr):
@@ -11362,7 +11393,7 @@ def build_spr_roll_result_lines_for_job(
 	if exact_n > 0:
 		n_rolls = max(1, exact_n)
 	elif lam_exact_n > 0:
-		if not spr_doc_is_lamination(spr_doc):
+		if not spr_doc_is_lamination(spr_doc) and not spr_doc_is_flexo(spr_doc):
 			frappe.throw(
 				_("Exact roll-line add mode is only for lamination: tick Is Lamination and use a 104 or 107 production plan.")
 			)
@@ -11384,7 +11415,14 @@ def build_spr_roll_result_lines_for_job(
 
 	start_idx = max(0, cint(roll_start_index or 0))
 	max_job_rolls = _spr_job_max_roll_lines(job_row, spr_doc)
-	use_quota_append = exact_n > 0 and not spr_doc_is_lamination(spr_doc) and not lam_exact_n and lam_n <= 0
+	use_quota_append = (
+		exact_n > 0
+		and not spr_doc_is_lamination(spr_doc)
+		and not spr_doc_is_slitting(spr_doc)
+		and not spr_doc_is_flexo(spr_doc)
+		and not lam_exact_n
+		and lam_n <= 0
+	)
 	if use_quota_append:
 		current = _spr_count_roll_lines_for_job(spr_doc, job_id)
 		if current + exact_n > max_job_rolls:
@@ -18904,6 +18942,49 @@ def _spr_append_bundle_sticker_row(
 	return bundle_batch_no, roll_numbers_str, comb_calculated
 
 
+def _spr_set_item_pack_extras(
+	row,
+	item_meta,
+	diameter=None,
+	cbm=None,
+	bay=None,
+	produced_length=None,
+	gross_weight=None,
+	core=None,
+	polybag=None,
+):
+	"""Grid fields entered on the bundle row before Save Row."""
+	if row is None or item_meta is None:
+		return
+	if produced_length is not None and flt(produced_length) > 0:
+		if item_meta.has_field("produced_length_mtrs"):
+			row.produced_length_mtrs = flt(produced_length)
+		if item_meta.has_field("custom_produced_length_mtrs"):
+			row.custom_produced_length_mtrs = flt(produced_length)
+	if gross_weight is not None and flt(gross_weight) > 0 and item_meta.has_field("gross_weight"):
+		row.gross_weight = flt(gross_weight)
+		if item_meta.has_field("net_weight"):
+			row.net_weight = _spr_calc_net_weight_from_gross_for_bundle(row, flt(gross_weight))
+	core_txt = _cstr(core).strip()
+	if core_txt and item_meta.has_field("custom_core_width_mm"):
+		row.custom_core_width_mm = core_txt
+	if polybag is not None and item_meta.has_field("custom_polybag_kgs"):
+		row.custom_polybag_kgs = flt(polybag)
+	if diameter is not None and flt(diameter) > 0:
+		if item_meta.has_field("custom_diameter_inches"):
+			row.custom_diameter_inches = flt(diameter)
+		if item_meta.has_field("custom_diameter"):
+			row.custom_diameter = flt(diameter)
+	if cbm is not None and flt(cbm) > 0:
+		if item_meta.has_field("custom_cbm_cubic_meters"):
+			row.custom_cbm_cubic_meters = flt(cbm)
+		if item_meta.has_field("custom_cbm"):
+			row.custom_cbm = flt(cbm)
+	bay_txt = _cstr(bay).strip()
+	if bay_txt and item_meta.has_field("custom_bay"):
+		row.custom_bay = bay_txt
+
+
 @frappe.whitelist()
 def gsm_apply_bundle_packaging(
 	shaft_production_run,
@@ -18914,6 +18995,11 @@ def gsm_apply_bundle_packaging(
 	produced_length_mtrs=None,
 	pp_id=None,
 	width_mix=None,
+	custom_diameter_inches=None,
+	custom_cbm_cubic_meters=None,
+	custom_bay=None,
+	custom_core_width_mm=None,
+	custom_polybag_kgs=None,
 ):
 	"""GSM bundle flow: create N fresh roll lines + Bundle Stickers (single or multi width)."""
 	_spr_require_saved(shaft_production_run)
@@ -18950,14 +19036,16 @@ def gsm_apply_bundle_packaging(
 
 		pp_resolved = pp_id or _cstr(spr.get("production_plan")).strip()
 		unit = _cstr(spr.get("custom_unit") or "").strip()
-		limits = _gsm_job_roll_limits_from_job_row(sj)
-		max_job_rolls = cint(limits.get("max_rolls") or 0)
-		if unit:
-			current_rolls = _gsm_count_job_rolls_all_sprs(pp_resolved, job_id, unit=unit, produced_only=True)
-		else:
-			current_rolls = _spr_count_roll_lines_for_job(spr, job_id, produced_only=True)
-		if max_job_rolls > 0 and current_rolls + no_of_packaging > max_job_rolls:
-			_spr_throw_roll_quota_exceeded(job_id, max_job_rolls, current_rolls)
+		# Slitting has no shaft quota. A job with no shaft plan was capped at 1 roll.
+		if not spr_doc_is_slitting(spr):
+			limits = _gsm_job_roll_limits_from_job_row(sj)
+			max_job_rolls = cint(limits.get("max_rolls") or 0)
+			if unit:
+				current_rolls = _gsm_count_job_rolls_all_sprs(pp_resolved, job_id, unit=unit, produced_only=True)
+			else:
+				current_rolls = _spr_count_roll_lines_for_job(spr, job_id, produced_only=True)
+			if max_job_rolls > 0 and current_rolls + no_of_packaging > max_job_rolls:
+				_spr_throw_roll_quota_exceeded(job_id, max_job_rolls, current_rolls)
 
 		# Build one template per roll from the chosen width(s) — never cycle mix widths
 		# (combo jobs like 30+33 have different WO/item per width; single-width pack uses only that WO).
@@ -19005,6 +19093,15 @@ def gsm_apply_bundle_packaging(
 				row.net_weight = _spr_calc_net_weight_from_gross_for_bundle(row, g)
 			if item_meta.has_field("custom_produced_length_mtrs"):
 				row.custom_produced_length_mtrs = produced_length_mtrs
+			_spr_set_item_pack_extras(
+				row,
+				item_meta,
+				diameter=custom_diameter_inches,
+				cbm=custom_cbm_cubic_meters,
+				bay=custom_bay,
+				core=custom_core_width_mm,
+				polybag=custom_polybag_kgs,
+			)
 			selected.append(row)
 
 		bundle_net = round(sum(flt(getattr(it, "net_weight", None)) for it in selected), 2)

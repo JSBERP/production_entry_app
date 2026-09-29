@@ -125,6 +125,32 @@ function _run_transfer_scan(frm, barcode) {
 				done();
 				return;
 			}
+			if (msg.ask_unscan) {
+				const batch = msg.batch_no || barcode;
+				frappe.confirm(
+					__("Remove {0} rolls?", [batch]),
+					() => {
+						frappe.call({
+							method: "production_entry.production_planning.transfer_logistics.record_transfer_barcode_scan",
+							args: { stock_entry: frm.doc.name, barcode: batch, confirm_unscan: 1 },
+							callback: function (r2) {
+								const cleared = r2.message || {};
+								if (cleared.ok) {
+									_apply_scan_to_locals(frm, cleared.row_name, 0, cleared.qty);
+									frappe.show_alert({
+										message: __("Scanned qty for {0} set to 0", [batch]),
+										indicator: "orange",
+									});
+								}
+								done();
+							},
+							error: () => done(),
+						});
+					},
+					() => done()
+				);
+				return;
+			}
 			_apply_scan_to_locals(frm, msg.row_name, msg.scanned_qty, msg.qty);
 			frappe.show_alert({
 				message: __("Row #{0}: Scanned {1} / {2}", [msg.idx, msg.scanned_qty, msg.qty]),
@@ -229,6 +255,25 @@ function _scan_locally(frm, barcode) {
 	}
 
 	const approved = Number(existing_row._protected_qty != null ? existing_row._protected_qty : existing_row.qty || 0);
+	const already = flt(existing_row.scanned_qty || existing_row.custom_scanned_qty);
+	if (already > 0) {
+		const batch = existing_row.batch_no || barcode;
+		frappe.confirm(__("Remove {0} rolls?", [batch]), () => {
+			const updates = { custom_scanned_qty: 0, qty: approved };
+			if (frappe.meta.has_field("Stock Entry Detail", "scanned_qty")) {
+				updates.scanned_qty = 0;
+			}
+			frappe.model.set_value(existing_row.doctype, existing_row.name, updates).then(() => {
+				existing_row._protected_qty = approved;
+				frm.refresh_field("items");
+				frappe.show_alert({
+					message: __("Scanned qty for {0} set to 0", [batch]),
+					indicator: "orange",
+				});
+			});
+		});
+		return;
+	}
 	const new_scanned = approved > 0 ? approved : 0;
 	const updates = { custom_scanned_qty: new_scanned, qty: approved };
 	if (frappe.meta.has_field("Stock Entry Detail", "scanned_qty")) {

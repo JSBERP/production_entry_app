@@ -25,11 +25,35 @@ function cint(v) {
 	return Number.isFinite(n) ? n : 0;
 }
 
+let pendingGridRolls = [];
+
 function sprJobIds(doc) {
 	const jobs = doc?.shaft_jobs || [];
 	return (jobs || [])
 		.map((j) => String(j.job_id || j.job || "").trim())
 		.filter(Boolean);
+}
+
+function gridRollJobId(row) {
+	return String(row?.job_id || row?.job || "").trim();
+}
+
+function usableGridRolls() {
+	return (pendingGridRolls || []).filter((row) => {
+		if (cint(row?.is_wasted) || cint(row?.is_bundle_row)) {
+			return false;
+		}
+		return Boolean(String(row?.batch_no || "").trim() || cint(row?.roll_no));
+	});
+}
+
+function gridJobIds() {
+	return [...new Set(usableGridRolls().map(gridRollJobId).filter(Boolean))];
+}
+
+function gridRollsForJob(jobId) {
+	const jid = String(jobId || "").trim();
+	return usableGridRolls().filter((row) => sprJobIdsMatch(gridRollJobId(row), jid));
 }
 
 async function promptSprJobId(ids, title) {
@@ -63,13 +87,14 @@ async function resolveJobIdForSpr(sprName, jobId) {
 	if (preferred && rollsForSprJob(doc, preferred).length) {
 		return preferred;
 	}
+	const fromGrid = gridJobIds();
 	const rollJobIds = sprJobIdsWithRolls(doc);
 	const shaftJobIds = sprJobIds(doc);
-	const ids = rollJobIds.length ? rollJobIds : shaftJobIds;
+	const ids = fromGrid.length ? fromGrid : rollJobIds.length ? rollJobIds : shaftJobIds;
 	if (!ids.length) {
 		return "";
 	}
-	if (preferred && ids.includes(preferred)) {
+	if (preferred && ids.some((id) => sprJobIdsMatch(id, preferred))) {
 		return preferred;
 	}
 	return promptSprJobId(ids);
@@ -111,17 +136,54 @@ function rollSuffix(row) {
 	return cint(row?.roll_no);
 }
 
+function rollRowIsUsable(row) {
+	if (cint(row?.is_wasted) || cint(row?.is_bundle_row)) {
+		return false;
+	}
+	return Boolean(String(row?.batch_no || "").trim() || cint(row?.roll_no));
+}
+
+function gridRollAsQcRow(row) {
+	return {
+		name: row.spr_item_name || row.name || row.batch_no,
+		batch_no: row.batch_no,
+		roll_no: row.roll_no,
+		gsm: row.gsm,
+		quality: row.quality,
+		color: row.color || row.fabric_colour,
+		job: gridRollJobId(row),
+		job_id: gridRollJobId(row),
+	};
+}
+
 function rollsForSprJob(spr, jobId) {
 	const jid = String(jobId || "").trim();
-	return (spr.items || []).filter((row) => {
+	const direct = (spr.items || []).filter((row) => {
 		if (!sprJobIdsMatch(sprItemJobId(row), jid)) {
 			return false;
 		}
-		if (cint(row.is_wasted) || cint(row.is_bundle_row)) {
+		return rollRowIsUsable(row);
+	});
+	if (direct.length) {
+		return direct;
+	}
+	const grid = gridRollsForJob(jid);
+	if (!grid.length) {
+		return [];
+	}
+	const batches = new Set(
+		grid.map((row) => String(row.batch_no || "").trim()).filter(Boolean)
+	);
+	const byBatch = (spr.items || []).filter((row) => {
+		if (!rollRowIsUsable(row)) {
 			return false;
 		}
-		return Boolean(String(row.batch_no || "").trim() || cint(row.roll_no));
+		return batches.has(String(row.batch_no || "").trim());
 	});
+	if (byBatch.length) {
+		return byBatch;
+	}
+	return grid.map(gridRollAsQcRow);
 }
 
 function sprJobIdsWithRolls(spr) {
@@ -385,6 +447,10 @@ async function openSprQualityCheck(sprName, testType, jobId) {
 }
 
 frappe.provide("production_entry.spr_quality_check");
+
+production_entry.spr_quality_check.setGridRolls = (rolls) => {
+	pendingGridRolls = Array.isArray(rolls) ? rolls : [];
+};
 
 production_entry.spr_quality_check.openSprGsmTesting = (sprName, jobId) =>
 	openSprQualityCheck(sprName, "round_gsm", jobId);

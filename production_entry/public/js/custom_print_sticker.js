@@ -45,7 +45,7 @@ function resolve_label_template_spec(raw_label, doc, callback) {
         return;
     }
     frappe.call({
-        method: "production_entry.production_planning.doctype.shaft_production_run.shaft_production_run.get_label_template_print_spec",
+        method: "production_entry.production_planning.unified_production_entry_api.get_label_template_print_spec",
         args: { name: key },
         callback: function (r) {
             var spec = r && r.message && r.message.from_template ? r.message : null;
@@ -85,6 +85,15 @@ function continue_print_with_details(row_name, item_name, frm, spec) {
     var template_fields = spec && spec.fields ? spec.fields : null;
     var is_template = !!(spec && spec.from_template);
 
+    if (is_template) {
+        print_from_label_template(row, frm, spec, {
+            gsm: final_gsm,
+            color: final_color,
+            quality: final_quality
+        });
+        return;
+    }
+
     if (label_type.includes("reliance") || label_type.includes("relience")) {
         flow_reliance_cm(row_name, final_gsm, final_color, final_quality, frm);
     } else if (!is_template && label_type.includes("custom")) {
@@ -97,6 +106,128 @@ function continue_print_with_details(row_name, item_name, frm, spec) {
     } else {
         var w = row.width_inch || details.width_inch || "0";
         frappe.run_print_logic(row_name, w + " Inches", final_gsm, final_color, final_quality, frm, template_fields);
+    }
+}
+
+function lt_flag(fields, name, fallback) {
+    if (!fields || fields[name] === undefined || fields[name] === null || fields[name] === "") {
+        return fallback ? 1 : 0;
+    }
+    return cint(fields[name]) ? 1 : 0;
+}
+
+function lt_esc(value) {
+    return frappe.utils.escape_html(String(value == null ? "" : value));
+}
+
+/** Print using the saved Label Template flags. Roll values come from the SPR row. */
+function print_from_label_template(row, frm, spec, details) {
+    var fields = (spec && spec.fields) || {};
+    var f = frm || cur_frm;
+    var doc = (f && f.doc) || {};
+    var type = String(spec.base_template || spec.label_name || spec.name || "").toLowerCase();
+    var isReliance = type.indexOf("reliance") !== -1 || type.indexOf("relience") !== -1;
+    var widthNum = parseFloat(row.width_inch || 0) || 0;
+    var widthVal = isReliance ? (widthNum * 2.54).toFixed(2) + " Cms" : (widthNum || "") + " Inches";
+    var d = {
+        company: "JAYASHREE SPUN BOND",
+        process: "NON WOVEN FABRICS",
+        email: "enquiry@jayashreespunbond.com",
+        quality: details.quality || row.quality || "",
+        color: details.color || row.color || "",
+        gsm: details.gsm || row.gsm || "",
+        width_val: widthVal,
+        length: row.custom_produced_length_mtrs || row.produced_length_mtrs || "0",
+        gw: (flt(row.gross_weight) || flt(row.net_weight) || 0).toFixed(2),
+        nw: (flt(row.net_weight) || 0).toFixed(2),
+        batch_no: row.batch_no || "",
+        roll_no: row.roll_no || "",
+        order_code: row.party_code || doc.custom_order_code || doc.order_code || "",
+        customer_name: row.customer_name || doc.customer_name || "",
+        sheet_size: row.sheet_size || "",
+        total_sheets: row.total_sheets || row.no_of_sheets || ""
+    };
+    var wIn = flt(fields.width_in) || flt(spec.width_in) || 4;
+    var hIn = flt(fields.height_in) || flt(spec.height_in) || 4;
+    var rows = [];
+    var tr = function (label, value) {
+        return "<tr><td class=\"lbl\">" + lt_esc(label) + "</td><td class=\"colon\">:</td><td class=\"val\">" + lt_esc(value) + "</td></tr>";
+    };
+    if (lt_flag(fields, "show_gsm", 1)) rows.push(tr("GSM", d.gsm));
+    if (lt_flag(fields, "show_color", 1)) rows.push(tr("COLOR", String(d.color || "").toUpperCase()));
+    if (lt_flag(fields, "show_length", 1)) rows.push(tr("LENGTH", d.length + " Mtrs"));
+    if (lt_flag(fields, "show_width", 1)) rows.push(tr("WIDTH", widthVal));
+    if (lt_flag(fields, "show_gw", 1)) rows.push(tr("GROSS WEIGHT", d.gw + " Kgs"));
+    if (lt_flag(fields, "show_nw", 1)) rows.push(tr("NET WEIGHT", d.nw + " Kgs"));
+    if (lt_flag(fields, "show_roll_no", 0)) rows.push(tr("ROLL NO", d.roll_no));
+    if (lt_flag(fields, "show_order_code", 0) && !lt_flag(fields, "show_quality", 1)) {
+        rows.push(tr("ORDER CODE", d.order_code));
+    }
+    var header = "";
+    if (lt_flag(fields, "show_company", 1) || lt_flag(fields, "show_company_name", 0)) {
+        header += "<div class=\"company\">" + lt_esc(d.company) + "</div>";
+    }
+    if (lt_flag(fields, "show_process", 1) || type.indexOf("plain") !== -1) {
+        header += "<div class=\"process\">" + lt_esc(d.process) + "</div>";
+    }
+    if (lt_flag(fields, "show_email", 0)) {
+        header += "<div class=\"email\">" + lt_esc(d.email) + "</div>";
+    }
+    if (lt_flag(fields, "show_customer", 0) && d.customer_name) {
+        header += "<div class=\"customer\">" + lt_esc(d.customer_name) + "</div>";
+    }
+    if (lt_flag(fields, "show_quality", 1)) {
+        var q = String(d.quality || "").toUpperCase();
+        if (lt_flag(fields, "show_order_code", 0) && d.order_code) {
+            q += " | " + String(d.order_code).toUpperCase();
+        }
+        header += "<div class=\"quality\">" + lt_esc(q) + "</div>";
+    }
+    var footer = lt_flag(fields, "show_batch", 1)
+        ? "<div class=\"batch\">BATCH No : " + lt_esc(d.batch_no) + "</div>"
+        : "";
+    var barcode = lt_flag(fields, "show_barcode", 1)
+        ? "<div class=\"barcode\"><svg id=\"lt-print-barcode\"></svg></div>"
+        : "";
+    var signs = "";
+    if (lt_flag(fields, "entered_by", 0) || lt_flag(fields, "despatch_by", 0)) {
+        signs = "<div class=\"signs\">";
+        if (lt_flag(fields, "entered_by", 0)) signs += "<div>ENTERED BY</div>";
+        if (lt_flag(fields, "despatch_by", 0)) signs += "<div>DESPATCH BY</div>";
+        signs += "</div>";
+    }
+    var html = [
+        "<html><head><title>", lt_esc(spec.label_name || "Label"), "</title>",
+        "<style>",
+        "@page { size: " + wIn + "in " + hIn + "in; margin: 0; }",
+        "body { margin: 0; font-family: Arial, sans-serif; background: #eee; }",
+        ".btn-panel { text-align: center; padding: 10px; } .btn-panel button { padding: 8px 16px; font-weight: bold; margin: 0 6px; }",
+        ".label { width: " + wIn + "in; min-height: " + hIn + "in; margin: 12px auto; background: #fff; border: 1px solid #111; box-sizing: border-box; padding: 10px 14px; }",
+        ".company { font-size: 22px; font-weight: 700; text-align: center; }",
+        ".process { font-size: 16px; font-weight: 700; text-align: center; }",
+        ".email, .customer, .quality { text-align: center; font-weight: 700; margin-top: 2px; }",
+        "table { width: 100%; border-collapse: collapse; margin-top: 8px; }",
+        "td { padding: 2px 4px; font-size: 14px; } .lbl { font-weight: 700; width: 42%; } .val { font-weight: 700; }",
+        ".batch { text-align: center; font-weight: 700; margin-top: 8px; }",
+        ".barcode { text-align: center; margin-top: 4px; }",
+        ".signs { display: flex; justify-content: space-between; margin-top: 10px; font-size: 11px; font-weight: 700; }",
+        "@media print { .btn-panel { display: none; } body { background: #fff; } .label { margin: 0; border: none; } }",
+        "</style></head><body>",
+        "<div class=\"btn-panel\"><button onclick=\"window.print()\">PRINT</button><button onclick=\"window.close()\">CLOSE</button></div>",
+        "<div class=\"label\">", header,
+        "<table>", rows.join(""), "</table>",
+        footer, barcode, signs,
+        "</div>",
+        "<script src=\"https://cdn.jsdelivr.net/npm/jsbarcode@3.11.0/dist/JsBarcode.all.min.js\"><\/script>",
+        "<script>if(window.JsBarcode && document.getElementById('lt-print-barcode')){JsBarcode('#lt-print-barcode','",
+        String(d.batch_no || "").replace(/'/g, ""),
+        "',{format:'CODE128',displayValue:true,fontSize:12,height:46,width:1.6,margin:0});}<\/script>",
+        "</body></html>"
+    ].join("");
+    var pw = window.open("", "_blank", "height=700,width=520");
+    if (pw) {
+        pw.document.write(html);
+        pw.document.close();
     }
 }
 

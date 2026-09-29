@@ -827,6 +827,11 @@ function render_all(d, ctx, state, frm) {
 		state.sets[si].rows.push(make_empty_row(custom_unit));
 		render_all(d, ctx, state, frm);
 	});
+	$wrap.find(".btn-copy-first-row").on("click", function () {
+		const si = parseInt($(this).data("set"), 10);
+		const times = parseInt($(this).data("times"), 10) || 1;
+		copy_first_mixing_row(d, ctx, state, frm, si, times);
+	});
 	$wrap.find(".btn-del-row").on("click", function () {
 		const si = parseInt($(this).data("set"), 10);
 		const rows = state.sets[si].rows;
@@ -1034,10 +1039,19 @@ function render_set_html(set, si, ctx, state, readOnly) {
 	const delSetBtn = readOnly
 		? ""
 		: `<button class="btn btn-xs btn-danger btn-del-set" data-set="${si}" style="margin-left:auto">🗑 ${__("Delete Set")}</button>`;
+	const copyBtns = readOnly
+		? ""
+		: [1, 3, 5]
+				.map(
+					(n) =>
+						`<button type="button" class="btn btn-xs btn-default btn-copy-first-row" data-set="${si}" data-times="${n}">x${n}</button>`
+				)
+				.join("");
 
 	return `
 		<div style="margin-top:${si > 0 ? "24px" : "0"};padding:8px 0 4px;font-weight:600;color:#5e35b1;border-bottom:2px solid #ede7f6;display:flex;align-items:center;gap:8px">
 			<span>🧪 ${__("Mixing Grid")} — ${label}</span>
+			${copyBtns}
 			${delSetBtn}
 		</div>
 		${table}
@@ -1103,6 +1117,35 @@ function consume_row(ctx, state, si, ri, d, frm) {
 				}
 			},
 		});
+	});
+}
+
+function clone_unconsumed_mixing_row(row) {
+	const copy = JSON.parse(JSON.stringify(row || {}));
+	copy.consumed = false;
+	copy.consumed_by = null;
+	copy.consumed_at = null;
+	return copy;
+}
+
+function copy_first_mixing_row(d, ctx, state, frm, si, times) {
+	if (state.completed || ctx.read_only) return;
+	collect_row_qtys(d, state);
+	const set = state.sets[si];
+	const source = set?.rows?.[0];
+	if (!source) {
+		frappe.show_alert({ message: __("This set has no first row to copy."), indicator: "orange" });
+		return;
+	}
+	const n = Math.max(1, parseInt(times, 10) || 1);
+	for (let i = 0; i < n; i++) {
+		set.rows.push(clone_unconsumed_mixing_row(source));
+	}
+	render_all(d, ctx, state, frm);
+	if (typeof d._mixPersist === "function") d._mixPersist();
+	frappe.show_alert({
+		message: __("Added {0} row(s) from the first row.", [n]),
+		indicator: "green",
 	});
 }
 

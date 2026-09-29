@@ -409,7 +409,7 @@ export async function gsmPrintWastageLabel(sprName, childRowName, tableField, ro
 }
 
 /** Start a Quality Checking form from GSM — uses the session SPR name when known. */
-export async function gsmOpenQualityCheck({ sprName, ppId, kind, jobId, session } = {}) {
+export async function gsmOpenQualityCheck({ sprName, ppId, kind, jobId, session, gridRolls } = {}) {
 	let name = String(sprName || "").trim();
 	if (!name && ppId) {
 		name = await findSprForGsm(ppId, true, session || {});
@@ -424,6 +424,9 @@ export async function gsmOpenQualityCheck({ sprName, ppId, kind, jobId, session 
 		return;
 	}
 	const k = String(kind || "round_gsm");
+	if (qc.setGridRolls) {
+		qc.setGridRolls(gridRolls || []);
+	}
 	try {
 		if (k === "patty_gsm" && typeof qc.openSprPattyCuttingGsmTesting === "function") {
 			await qc.openSprPattyCuttingGsmTesting(name, jobId);

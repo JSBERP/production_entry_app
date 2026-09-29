@@ -335,9 +335,38 @@ export function openSprBundlePackagingDialog(opts) {
 						return;
 					}
 					d.hide();
-					const applyMethod = gsmMode
-						? "production_entry.production_planning.unified_production_entry_api.gsm_apply_bundle_packaging"
-						: "production_entry.production_planning.doctype.shaft_production_run.shaft_production_run.spr_apply_bundle_packaging_for_job_width";
+					// Slitting / GSM entry: keep the row editable until Save Row (diameter and bay).
+					if (gsmMode) {
+						const widthLabel =
+							widthMix.length > 1
+								? widthMix
+										.map((m) => m.rolls + " * " + _bpFormatWidthLabel(m.width_inch))
+										.join(" + ") + " Inches"
+								: _bpFormatWidthLabel(widthInch) + '" (' + packCount + " rolls)";
+						if (typeof opts.onSuccess === "function") {
+							opts.onSuccess({
+								status: "ok",
+								pending: 1,
+								job_id: jp.job_id,
+								quality: jp.quality || "",
+								color: jp.color || "",
+								gsm: jp.gsm || "",
+								order_code: jp.order_code || jp.party_code || "",
+								width_inch: widthInch,
+								width_label: widthLabel,
+								pack_count: packCount,
+								segment_width: widthInch || (widthMix[0] && widthMix[0].width_inch) || 0,
+								whole_gross_kg: whole,
+								produced_length_mtrs: producedLength,
+								width_mix: widthMix,
+								meter_roll: jp.meter_roll || 0,
+								work_order: jp.work_order || "",
+							});
+						}
+						return;
+					}
+					const applyMethod =
+						"production_entry.production_planning.doctype.shaft_production_run.shaft_production_run.spr_apply_bundle_packaging_for_job_width";
 					const applyArgs = gsmMode
 						? {
 								shaft_production_run: sprName,
