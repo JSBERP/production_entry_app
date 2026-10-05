@@ -465,6 +465,76 @@ def log_removed_roll(doctype, name, batch_no, party_code="", item_code=""):
 	frappe.clear_document_cache(doctype, name)
 
 
+def _roll_details_for_batch(batch_no, party_code="", item_code="", parent_doctype="", parent_name=""):
+	"""Quality, colour, GSM, width, metres and weights for a removed roll."""
+	from production_entry.production_planning.transfer_logistics import (
+		_cstr,
+		_roll_spec_dict,
+		_spr_item_query_fields,
+	)
+
+	batch_no = _cstr(batch_no)
+	row = {}
+	if batch_no and frappe.db.table_exists("Shaft Production Run Item"):
+		spr = frappe.db.get_value(
+			"Shaft Production Run Item",
+			{"batch_no": batch_no},
+			_spr_item_query_fields(),
+			as_dict=True,
+		)
+		if spr:
+			row.update(spr)
+	line = None
+	line_doctype = ""
+	if parent_doctype == "Despatch Approval" and parent_name and frappe.db.table_exists("Despatch Approval Line"):
+		line_doctype = "Despatch Approval Line"
+	elif parent_doctype == "Stock Entry" and parent_name and frappe.db.table_exists("Stock Entry Detail"):
+		line_doctype = "Stock Entry Detail"
+	if line_doctype:
+		fields = ["item_code", "qty"]
+		meta = frappe.get_meta(line_doctype)
+		for fn in (
+			"party_code",
+			"batch_no",
+			"quality",
+			"color",
+			"gsm",
+			"width_inch",
+			"net_weight",
+			"gross_weight",
+			"meter_per_roll",
+		):
+			if meta.has_field(fn):
+				fields.append(fn)
+		line = frappe.db.get_value(
+			line_doctype,
+			{"parent": parent_name, "batch_no": batch_no},
+			fields,
+			as_dict=True,
+		)
+	if line:
+		for key, val in line.items():
+			if val not in (None, "", 0, 0.0) or key not in row:
+				if val not in (None, ""):
+					row[key] = val
+	if item_code and not row.get("item_code"):
+		row["item_code"] = item_code
+	spec = _roll_spec_dict(row, row.get("item_code") or item_code)
+	net = flt(row.get("net_weight") or row.get("qty") or 0)
+	gross = flt(row.get("gross_weight") or net)
+	return {
+		"item_code": _cstr(row.get("item_code") or item_code),
+		"party_code": _cstr(party_code or row.get("party_code")),
+		"quality": spec.get("quality") or "",
+		"color": spec.get("color") or "",
+		"gsm": cint(spec.get("gsm") or 0),
+		"width_inch": flt(spec.get("width_inch") or 0),
+		"meter_per_roll": flt(spec.get("meter_per_roll") or 0),
+		"net_weight": net,
+		"gross_weight": gross,
+	}
+
+
 def _removed_roll_log_rows(doctype, name):
 	if not frappe.db.exists("DocType", "Removed Roll Log") or not frappe.db.table_exists("Removed Roll Log"):
 		return []
@@ -504,5 +574,17 @@ def get_removed_rolls(doctype=None, name=None):
 		if key in seen:
 			continue
 		seen.add(key)
+		logged_party = entry.get("party_code") or ""
+		entry.update(
+			_roll_details_for_batch(
+				entry["batch_no"],
+				logged_party,
+				entry.get("item_code"),
+				doctype,
+				name,
+			)
+		)
+		if logged_party:
+			entry["party_code"] = logged_party
 		clean.append(entry)
 	return {"rolls": clean}

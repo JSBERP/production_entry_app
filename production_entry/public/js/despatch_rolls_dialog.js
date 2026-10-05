@@ -56,7 +56,7 @@ function jsb_show_despatch_rolls_dialog(args) {
 	html += '<div class="rolls-view printable-area" id="printable-rolls-area">';
 	html +=
 		'<table class="company-header-table"><tr><td>' +
-		'<img src="/private/files/JSB LOGO63b225.png" alt="JSB Logo"><br>' +
+		'<img src="/files/JSb.jpg59172c.jpeg" alt="JSB Logo"><br>' +
 		'<div class="doc-title">' +
 		__("Despatch Roll List") +
 		(docRef ? " | " + docRef : "") +
@@ -199,6 +199,90 @@ function jsb_show_despatch_rolls_dialog(args) {
 				printWindow.close();
 			}, 500);
 		},
+	});
+	d.show();
+}
+
+function jsb_show_removed_rolls_dialog(args) {
+	args = args || {};
+	window.jsb_show_removed_rolls_dialog = jsb_show_removed_rolls_dialog;
+	const rolls = args.rolls || [];
+	const esc = (v) => frappe.utils.escape_html(v == null || v === "" ? "" : String(v));
+	const num = (v) => {
+		const n = parseFloat(v);
+		return Number.isFinite(n) ? n : 0;
+	};
+	const orderCodes = [];
+	rolls.forEach((r) => {
+		const oc = String(r.party_code || r.order_code || "").trim();
+		if (oc && orderCodes.indexOf(oc) === -1) orderCodes.push(oc);
+	});
+	const orderCodeLabel = String(args.order_code || orderCodes.join(", ") || "").trim();
+
+	let html =
+		"<style>" +
+		".rolls-view { font-family: Arial, sans-serif !important; color: #000 !important; background: #fff !important; padding: 0; }" +
+		".printable-area { width: 100%; max-width: 1100px; margin: 0 auto; }" +
+		".company-header-table { width: 100%; border-collapse: collapse; border: 2px solid #2e7d32; margin-bottom: 10px; }" +
+		".company-header-table td { padding: 10px; text-align: center; }" +
+		".company-header-table img { height: 60px; width: auto; margin-bottom: 5px; }" +
+		".company-header-table .doc-title { font-size: 11px; font-weight: bold; text-transform: uppercase; border-top: 1px solid #ccc; margin-top: 5px; padding-top: 5px; }" +
+		".dt-table { width: 100%; border-collapse: collapse; border: 1px solid #000 !important; font-size: 10px; }" +
+		".dt-table th { background: #ffb74d !important; border: 1px solid #000 !important; padding: 6px; font-weight: 700; text-transform: uppercase; text-align: center; -webkit-print-color-adjust: exact; print-color-adjust: exact; }" +
+		".dt-table td { border: 1px solid #000 !important; padding: 5px 6px; text-align: center; }" +
+		".dt-table tfoot td { background: #c8e6c9 !important; border: 1px solid #000 !important; font-weight: bold; color: #1b5e20 !important; text-align: center; -webkit-print-color-adjust: exact; print-color-adjust: exact; }" +
+		".fb { font-weight: 700 !important; }" +
+		"</style>";
+	html += '<div class="rolls-view printable-area">';
+	html +=
+		'<table class="company-header-table"><tr><td>' +
+		'<img src="/files/JSb.jpg59172c.jpeg" alt="JSB Logo"><br>' +
+		'<div class="doc-title">' +
+		__("Removed Rolls") +
+		(orderCodeLabel ? " | " + esc(orderCodeLabel) : "") +
+		"</div></td></tr></table>";
+
+	if (!rolls.length) {
+		html += `<p style="margin:12px 0;color:#64748b;text-align:center">${__("No rolls have been removed.")}</p></div>`;
+	} else {
+		html +=
+			'<table class="dt-table"><thead><tr>' +
+			"<th>#</th><th>" + __("Order Code") + "</th><th>" + __("Batch No") + "</th><th>" + __("Quality") +
+			"</th><th>" + __("Color") + "</th><th>" + __("GSM") + "</th><th>" + __("Width (Inches)") +
+			"</th><th>" + __("Mtrs") + "</th><th>" + __("Net Wt") + "</th><th>" + __("Gross Wt") +
+			"</th><th>" + __("Removed By") + "</th><th>" + __("Removed At") +
+			"</th></tr></thead><tbody>";
+		let totalMtr = 0;
+		let totalNet = 0;
+		let totalGross = 0;
+		rolls.forEach((r, i) => {
+			const mtr = num(r.meter_per_roll || r.meter_roll);
+			const net = num(r.net_weight || r.qty);
+			const gross = num(r.gross_weight || net);
+			const gsm = num(r.gsm);
+			const width = num(r.width_inch);
+			totalMtr += mtr;
+			totalNet += net;
+			totalGross += gross;
+			const when = String(r.removed_at || "").replace("T", " ").replace(/\.\d+$/, "");
+			html +=
+				"<tr><td>" + (i + 1) + "</td><td>" + esc(r.party_code || r.order_code || "—") +
+				'</td><td class="fb">' + esc(r.batch_no) + "</td><td>" + esc(r.quality) +
+				"</td><td>" + esc(r.color) + "</td><td>" + (gsm ? String(gsm) : "") +
+				"</td><td>" + (width ? String(width) : "-") + "</td><td>" + mtr.toFixed(1) +
+				"</td><td>" + net.toFixed(2) + "</td><td>" + gross.toFixed(2) +
+				"</td><td>" + esc(r.removed_by || "—") + "</td><td>" + esc(when || "—") + "</td></tr>";
+		});
+		html +=
+			'</tbody><tfoot><tr><td colspan="7" class="fb">' + __("TOTAL CONSOLIDATED DESPATCH") +
+			"</td><td>" + totalMtr.toFixed(1) + "</td><td>" + totalNet.toFixed(2) +
+			"</td><td>" + totalGross.toFixed(2) + "</td><td></td><td></td></tr></tfoot></table></div>";
+	}
+
+	const d = new frappe.ui.Dialog({
+		title: orderCodeLabel ? __("Removed Rolls — {0}", [orderCodeLabel]) : __("Removed Rolls"),
+		fields: [{ fieldtype: "HTML", fieldname: "rolls_html", options: html }],
+		size: "extra-large",
 	});
 	d.show();
 }

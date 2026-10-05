@@ -623,34 +623,20 @@ function _showTransferRemovedRolls(frm) {
 		freeze_message: __("Loading removed rolls…"),
 		callback(r) {
 			const rolls = (r.message && r.message.rolls) || [];
-			const esc = (v) => frappe.utils.escape_html(String(v || "—"));
-			let html = `<p style="margin:8px 0;color:#64748b">${__("No rolls have been removed.")}</p>`;
-			if (rolls.length) {
-				const body = rolls
-					.map(
-						(row) => `<tr>
-							<td>${esc(row.batch_no)}</td>
-							<td>${esc(row.party_code)}</td>
-							<td>${esc(row.item_code)}</td>
-							<td>${esc(row.removed_by)}</td>
-							<td>${esc(row.removed_at)}</td>
-						</tr>`
-					)
-					.join("");
-				html = `<table class="table table-bordered table-sm" style="margin:0">
-					<thead><tr>
-						<th>${__("Roll")}</th>
-						<th>${__("Order")}</th>
-						<th>${__("Item")}</th>
-						<th>${__("Removed by")}</th>
-						<th>${__("Removed at")}</th>
-					</tr></thead>
-					<tbody>${body}</tbody>
-				</table>`;
+			if (typeof jsb_show_removed_rolls_dialog === "function") {
+				const orderCodes = [];
+				(frm.doc.items || []).forEach((row) => {
+					const oc = String(row.custom_order_code || row.order_code || "").trim();
+					if (oc && orderCodes.indexOf(oc) === -1) orderCodes.push(oc);
+				});
+				const headerOc = String(frm.doc.custom_order_code || frm.doc.order_code || "").trim();
+				jsb_show_removed_rolls_dialog({
+					rolls,
+					order_code: headerOc || orderCodes.join(", "),
+				});
+				return;
 			}
-			const d = new frappe.ui.Dialog({ title: __("Removed Rolls"), size: "large" });
-			d.$body.html(html);
-			d.show();
+			frappe.msgprint(__("Roll dialog not loaded — hard refresh (Ctrl+Shift+R)."));
 		},
 	});
 }

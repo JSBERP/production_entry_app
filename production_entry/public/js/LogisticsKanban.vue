@@ -1121,9 +1121,16 @@ async function viewRemovedRolls(da, doctype) {
       freeze_message: __("Loading removed rolls…"),
     });
     const rolls = (r.message && r.message.rolls) || [];
+    if (typeof jsb_show_removed_rolls_dialog === "function") {
+      jsb_show_removed_rolls_dialog({
+        rolls,
+        order_code: da.order_codes_label || "",
+      });
+      return;
+    }
     const d = new frappe.ui.Dialog({
       title: __("Removed Rolls"),
-      size: "large",
+      size: "extra-large",
     });
     d.$body.html(removedRollsTable(rolls));
     d.show();
