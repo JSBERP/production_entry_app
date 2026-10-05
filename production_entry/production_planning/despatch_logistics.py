@@ -10,6 +10,12 @@ import frappe
 from frappe import _
 from frappe.utils import cint, flt, getdate, now_datetime
 
+from production_entry.production_planning.loading_session import (
+	LOAD_VALUE_FIELDS,
+	ensure_loading_fields,
+	log_removed_roll,
+	public_session_from_row,
+)
 from production_entry.production_planning.scheduler_api import (
 	MOVEMENT_DESPATCH,
 	get_color_chart_data,
@@ -53,7 +59,7 @@ def _clubbing_sheet_transport_fields(club_names):
 	if not names or not frappe.db.exists("DocType", "Clubbing Sheet"):
 		return out
 	fields = ["name"]
-	for fn in ("vehicle_no", "driver", "driver_ph_no", "driver_phone", "driver_ph"):
+	for fn in ("vehicle_no", "driver", "drive_name", "driver_ph_no", "driver_phone", "driver_ph"):
 		if frappe.db.has_column("Clubbing Sheet", fn):
 			fields.append(fn)
 	if len(fields) == 1:
@@ -69,6 +75,7 @@ def _clubbing_sheet_transport_fields(club_names):
 		out[_cstr(r.name)] = {
 			"vehicle_no": _cstr(r.get("vehicle_no")),
 			"driver": _cstr(r.get("driver")),
+			"driver_name": _cstr(r.get("drive_name")) or _cstr(r.get("driver")),
 			"driver_ph_no": phone,
 		}
 	return out
@@ -634,6 +641,7 @@ def get_despatch_company_cards(
 	order_code=None,
 ):
 	"""Company cards for despatch mode with pending/approved approval chips."""
+	ensure_loading_fields()
 	fc = _cstr(from_company)
 	companies = get_logistics_companies()
 	oc = _cstr(order_code).strip().lower()
@@ -655,6 +663,9 @@ def get_despatch_company_cards(
 			approval_fields.append("custom_delivery_notes")
 		if _has_da_lane_date_field():
 			approval_fields.append("custom_despatch_lane_date")
+		for load_fn in LOAD_VALUE_FIELDS:
+			if frappe.db.has_column("Despatch Approval", load_fn):
+				approval_fields.append(load_fn)
 		approvals = frappe.get_all(
 			"Despatch Approval",
 			filters=filters,
@@ -676,6 +687,8 @@ def get_despatch_company_cards(
 			if not _transfer_date_in_scope(despatch_date, view_scope, date, week, month):
 				continue
 			line_fields = ["party_code", "customer_name", "item_code", "qty", "batch_no", "name"]
+			if frappe.db.has_column("Despatch Approval Line", "planning_table_row"):
+				line_fields.append("planning_table_row")
 			if frappe.db.has_column("Despatch Approval Line", "custom_loading_sequence"):
 				line_fields.append("custom_loading_sequence")
 			if frappe.db.has_column("Despatch Approval Line", "custom_club_load_order"):
@@ -766,15 +779,30 @@ def get_despatch_company_cards(
 			elif da.status == "Approved" and (any_draft or (dn_name and dn_docstatus == 0)):
 				card_status = "Draft DN"
 			queue_idx = cint(da.get(qf) or 0) if qf else 0
+			scan_complete = line_total > 0 and scanned_total >= line_total
+			club_id = _cstr(da.get("custom_clubbing_sheet")) if _has_da_club_field() else ""
+			ptr_info = _club_fields_for_ptrs([ln.get("planning_table_row") for ln in lines])
+			if not club_id:
+				for info in ptr_info.values():
+					if info.get("clubbing_sheet"):
+						club_id = info["clubbing_sheet"]
+						break
+			for ln in lines:
+				pc = _cstr(ln.get("party_code"))
+				info = ptr_info.get(_cstr(ln.get("planning_table_row"))) or {}
+				om = order_map.get(pc)
+				if not om or not info:
+					continue
+				if not om.get("loading_sequence"):
+					om["loading_sequence"] = info.get("loading_sequence") or ""
+				if not om.get("club_load_order"):
+					om["club_load_order"] = cint(info.get("club_load_order") or 0)
+			if club_id and club_id not in club_transport:
+				club_transport.update(_clubbing_sheet_transport_fields([club_id]))
 			club_orders = sorted(
 				order_map.values(),
 				key=lambda o: (cint(o.get("club_load_order") or 0) or 9999, _cstr(o.get("party_code"))),
 			)
-			scan_complete = line_total > 0 and scanned_total >= line_total
-			# Non-club approvals: treat scan as complete so Create DN stays available
-			club_id = _cstr(da.get("custom_clubbing_sheet")) if _has_da_club_field() else ""
-			if not club_id:
-				scan_complete = True
 			transport = club_transport.get(club_id) or {}
 			enriched.append(
 				{
@@ -802,7 +830,9 @@ def get_despatch_company_cards(
 					"scan_complete": scan_complete,
 					"vehicle_no": transport.get("vehicle_no") or "",
 					"driver": transport.get("driver") or "",
+					"driver_name": transport.get("driver_name") or transport.get("driver") or "",
 					"driver_ph_no": transport.get("driver_ph_no") or "",
+					"load_session": public_session_from_row(da),
 				}
 			)
 		pending = [a for a in enriched if a["status"] in ("Pending Approval", "Draft")]
@@ -2010,6 +2040,13 @@ def record_despatch_club_scan(name=None, barcode=None, confirm_unscan=0):
 			}
 		found.custom_scanned = 0
 		da.save(ignore_permissions=True)
+		log_removed_roll(
+			"Despatch Approval",
+			da.name,
+			batch,
+			party_code=_cstr(found.party_code),
+			item_code=_cstr(getattr(found, "item_code", None) or ""),
+		)
 		_zero_despatch_batch_on_delivery_notes(da, batch)
 		frappe.db.commit()
 		detail = get_despatch_approval_club_detail(name)

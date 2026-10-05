@@ -19172,6 +19172,15 @@ def get_unit_effective_limit_tons(unit, date_string):
 	return flt(HARD_LIMITS.get(unit_key, HARD_LIMITS.get(unit, 999.0)))
 
 
+def _maintenance_queue_limit_tons(unit, date_string):
+	"""Capacity left for orders on a day once blocking maintenance hours are removed."""
+	base = get_unit_effective_limit_tons(unit, date_string)
+	available = flt(get_unit_available_hours(unit, date_string))
+	if available <= 0.01:
+		return 0.0
+	return flt(base) * (min(available, 24.0) / 24.0)
+
+
 def is_date_under_maintenance(unit, date_string):
 	"""True when the calendar day has essentially no production capacity left."""
 	return get_unit_available_hours(unit, date_string) < 0.01
@@ -19319,7 +19328,14 @@ def add_equipment_maintenance(
 
 	cascade_result = {"cascaded_count": 0}
 	if not _is_non_blocking_maintenance_type(maintenance_type):
-		cascade_result = cascade_orders_after_maintenance_removal(unit, start_date, end_date)
+		cascade_result = cascade_orders_after_maintenance_removal(
+			unit,
+			start_date,
+			end_date,
+			after_order_code=after_order_code,
+			after_quality=after_quality,
+			after_color=after_color,
+		)
 		movement_log = cascade_result.get("movement_log") or []
 
 		if movement_log:
@@ -19361,10 +19377,39 @@ def add_equipment_maintenance(
 	}
 
 @frappe.whitelist()
-def cascade_orders_after_maintenance_removal(unit, maint_start_date, maint_end_date):
+def _maint_norm_key(value):
+	return " ".join(str(value or "").strip().upper().split())
+
+
+def _maintenance_row_is_anchor(item, after_order_code, after_quality, after_color):
+	code = _maint_norm_key(after_order_code)
+	if not code:
+		return False
+	if _maint_norm_key(item.get("party_code")) != code:
+		return False
+	quality = _maint_norm_key(after_quality)
+	color = _maint_norm_key(after_color)
+	if quality and _maint_norm_key(item.get("quality")) != quality:
+		return False
+	if color and _maint_norm_key(item.get("color")) != color:
+		return False
+	return True
+
+
+def cascade_orders_after_maintenance_removal(
+	unit,
+	maint_start_date,
+	maint_end_date,
+	after_order_code=None,
+	after_quality=None,
+	after_color=None,
+):
 	"""
-	Re-pack items planned inside a maintenance window against partial-day capacity.
-	Orders that no longer fit move forward to the next date with remaining capacity.
+	Move orders that sit inside a blocking maintenance window onto the next open capacity.
+
+	A full day (blank times) has no room, so those orders leave the window.
+	A partial last day keeps only what fits in the open hours.
+	Rows on the start date up to and including the chosen after-order stay put.
 	"""
 	from frappe.utils import add_days, getdate
 
@@ -19377,9 +19422,22 @@ def cascade_orders_after_maintenance_removal(unit, maint_start_date, maint_end_d
 	if not unit_params:
 		return {"status": "success", "message": "No items to cascade", "cascaded_count": 0}
 
+	quality_expr = "''"
+	if frappe.db.has_column("Planning Table", "custom_quality") and frappe.db.has_column("Planning Table", "quality"):
+		quality_expr = "COALESCE(NULLIF(i.custom_quality, ''), NULLIF(i.quality, ''), '')"
+	elif frappe.db.has_column("Planning Table", "quality"):
+		quality_expr = "COALESCE(i.quality, '')"
+	elif frappe.db.has_column("Planning Table", "custom_quality"):
+		quality_expr = "COALESCE(i.custom_quality, '')"
+	color_expr = "COALESCE(i.color, '')" if frappe.db.has_column("Planning Table", "color") else "''"
+
 	items = frappe.db.sql(
 		f"""
-		SELECT i.name, i.qty, i.unit, COALESCE(i.planned_date, p.custom_planned_date, p.ordered_date) as effective_planned_date
+		SELECT i.name, i.qty, i.unit, i.idx,
+		       p.party_code as party_code,
+		       {quality_expr} as quality,
+		       {color_expr} as color,
+		       COALESCE(i.planned_date, p.custom_planned_date, p.ordered_date) as effective_planned_date
 		FROM `tabPlanning Table` i
 		JOIN `tabPlanning sheet` p ON i.parent = p.name
 		WHERE i.unit IN ({", ".join(["%s"] * len(unit_params))})
@@ -19400,19 +19458,29 @@ def cascade_orders_after_maintenance_removal(unit, maint_start_date, maint_end_d
 	cascaded_count = 0
 	local_loads = {}
 	movement_log = []
+	start_key = str(start_dt)
 
-	# Group by planned date, then keep what fits under effective limit; cascade overflow.
 	by_date = {}
 	for item in items:
 		d = str(getdate(item.get("effective_planned_date")))
 		by_date.setdefault(d, []).append(item)
 
+	if after_order_code and start_key in by_date:
+		day_items = by_date[start_key]
+		last_anchor = -1
+		for idx, item in enumerate(day_items):
+			if _maintenance_row_is_anchor(item, after_order_code, after_quality, after_color):
+				last_anchor = idx
+		if last_anchor >= 0:
+			by_date[start_key] = day_items[last_anchor + 1 :]
+
 	overflow = []
 	for date_str, day_items in sorted(by_date.items()):
+		if not day_items:
+			continue
 		item_unit = normalize_planning_unit_for_select((day_items[0].get("unit") or unit)) or unit
-		limit = get_unit_effective_limit_tons(item_unit, date_str)
+		limit = _maintenance_queue_limit_tons(item_unit, date_str)
 		load_key = (date_str, item_unit)
-		# Rebuild day from empty for packing against new maintenance capacity.
 		running = 0.0
 		for item in day_items:
 			qty_tons = flt(item.get("qty")) / 1000.0
@@ -19438,11 +19506,11 @@ def cascade_orders_after_maintenance_removal(unit, maint_start_date, maint_end_d
 		for _i in range(60):
 			candidate_str = candidate if isinstance(candidate, str) else candidate.strftime("%Y-%m-%d")
 
-			if is_date_under_maintenance(item_unit, candidate_str):
+			if _maintenance_queue_limit_tons(item_unit, candidate_str) < 0.01:
 				candidate = add_days(candidate, 1)
 				continue
 
-			unit_limit = get_unit_effective_limit_tons(item_unit, candidate_str)
+			unit_limit = _maintenance_queue_limit_tons(item_unit, candidate_str)
 			load_key = (candidate_str, item_unit)
 			if load_key not in local_loads:
 				local_loads[load_key] = get_unit_load(candidate_str, item_unit, "__all__", pb_only=1)
@@ -19669,7 +19737,7 @@ def _extract_maintenance_cascade_log(notes_text):
     except Exception:
         return []
 
-def _restore_orders_to_original_dates(unit, movement_log):
+def _restore_orders_to_original_dates(unit, movement_log, ignore_maintenance=False):
     """Restore moved items back to their original dates after maintenance is deleted."""
     from frappe.utils import getdate
 
@@ -19715,7 +19783,8 @@ def _restore_orders_to_original_dates(unit, movement_log):
             continue
 
         # Avoid restoring into another active maintenance window.
-        if is_date_under_maintenance(unit, from_date):
+        # Edit puts every moved row back first, then the new window is applied.
+        if not ignore_maintenance and is_date_under_maintenance(unit, from_date):
             skipped_count += 1
             continue
 
@@ -19799,6 +19868,110 @@ def _fallback_restore_by_range(unit, maint_start_date, maint_end_date):
 
     frappe.db.commit()
     return {"restored_count": restored, "skipped_count": skipped}
+
+def _maintenance_user_notes(notes_text):
+	marker = "MAINTENANCE_CASCADE_LOG::"
+	text = str(notes_text or "")
+	if marker in text:
+		text = text.split(marker, 1)[0]
+	return text.strip()
+
+
+def _store_maintenance_cascade_log(doc_name, user_notes, movement_log):
+	import json
+
+	marker = "MAINTENANCE_CASCADE_LOG::"
+	notes = _maintenance_user_notes(user_notes)
+	if movement_log:
+		log_line = marker + json.dumps(movement_log, separators=(",", ":"))
+		notes = f"{notes}\n\n{log_line}" if notes else log_line
+		frappe.cache().set_value(f"maintenance_cascade_log::{doc_name}", movement_log)
+	else:
+		try:
+			frappe.cache().delete_value(f"maintenance_cascade_log::{doc_name}")
+		except Exception:
+			pass
+	frappe.db.set_value("Equipment Maintenance", doc_name, "notes", notes, update_modified=False)
+
+
+@frappe.whitelist()
+def update_equipment_maintenance(
+	name,
+	unit,
+	maintenance_type,
+	start_date,
+	end_date,
+	notes=None,
+	start_time=None,
+	end_time=None,
+	after_order_code=None,
+	after_quality=None,
+	after_color=None,
+):
+	"""Edit a maintenance window and re-queue orders for the new hours."""
+	if not name or not frappe.db.exists("Equipment Maintenance", name):
+		return {"status": "error", "message": "Maintenance record not found"}
+
+	_ensure_equipment_maintenance_unit_options()
+	_ensure_equipment_maintenance_time_fields()
+	doc = frappe.get_doc("Equipment Maintenance", name)
+	old_unit = doc.unit
+	old_type = doc.maintenance_type
+	old_notes = doc.notes or ""
+	movement_log = frappe.cache().get_value(f"maintenance_cascade_log::{name}") or _extract_maintenance_cascade_log(old_notes)
+
+	if not _is_non_blocking_maintenance_type(old_type):
+		_restore_orders_to_original_dates(old_unit, movement_log, ignore_maintenance=True)
+
+	unit = _normalize_maintenance_unit(unit)
+	user_notes = _maintenance_user_notes(notes if notes is not None else old_notes)
+	doc.unit = unit
+	doc.maintenance_type = maintenance_type
+	doc.start_date = start_date
+	doc.end_date = end_date
+	doc.notes = user_notes
+	has_st, has_et = _maintenance_has_time_columns()
+	if has_st:
+		doc.start_time = start_time or None
+	if has_et:
+		doc.end_time = end_time or None
+	cols = set(frappe.db.get_table_columns("Equipment Maintenance") or [])
+	if "after_order_code" in cols:
+		doc.after_order_code = _cstr(after_order_code).strip()
+	if "after_quality" in cols:
+		doc.after_quality = _cstr(after_quality).strip()
+	if "after_color" in cols:
+		doc.after_color = _cstr(after_color).strip()
+	doc.save(ignore_permissions=False)
+
+	cascade_result = {"cascaded_count": 0, "movement_log": []}
+	if not _is_non_blocking_maintenance_type(maintenance_type):
+		cascade_result = cascade_orders_after_maintenance_removal(
+			unit,
+			start_date,
+			end_date,
+			after_order_code=after_order_code,
+			after_quality=after_quality,
+			after_color=after_color,
+		)
+		_store_maintenance_cascade_log(doc.name, user_notes, cascade_result.get("movement_log") or [])
+	else:
+		_store_maintenance_cascade_log(doc.name, user_notes, [])
+
+	frappe.db.commit()
+	time_msg = ""
+	if start_time or end_time:
+		time_msg = f" ({start_time or '00:00'} ΓÇô {end_time or '23:59'})"
+	return {
+		"status": "success",
+		"message": (
+			f"Maintenance updated for {unit} from {start_date} to {end_date}{time_msg}. "
+			f"Moved {cascade_result.get('cascaded_count', 0)} items."
+		),
+		"cascaded_count": cascade_result.get("cascaded_count", 0),
+		"name": doc.name,
+	}
+
 
 @frappe.whitelist()
 def delete_maintenance_and_cascade(maintenance_record_name):

@@ -10,6 +10,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, flt, getdate, now_datetime
 
+from production_entry.production_planning.loading_session import log_removed_roll
 from production_entry.production_planning.scheduler_api import (
 	PLANNING_MOVEMENT_TYPE_FIELD,
 	_expand_spr_name_tokens,
@@ -2302,6 +2303,12 @@ def _transfer_ste_naming_series(from_company, to_company):
 	return _cstr(TRANSFER_STE_SERIES_BY_COMPANY_PAIR.get((fc, tc)) or "").strip()
 
 
+def _fg_warehouse_holding_batch(batch_no, fallback):
+	from production_entry.production_planning.planning_doctypes import finished_goods_warehouse_for_batch
+
+	return finished_goods_warehouse_for_batch(batch_no, fallback) or fallback
+
+
 def _create_draft_transfer_stock_entry(ta):
 	fc = _cstr(ta.from_company)
 	wh = TRANSFER_WAREHOUSE_BY_COMPANY.get(fc)
@@ -2348,7 +2355,7 @@ def _create_draft_transfer_stock_entry(ta):
 		row = {
 			"item_code": ic,
 			"qty": qty,
-			"s_warehouse": s_wh,
+			"s_warehouse": _fg_warehouse_holding_batch(ln.batch_no, s_wh),
 			"t_warehouse": t_wh,
 			"uom": ln.uom or frappe.db.get_value("Item", ic, "stock_uom") or "Kg",
 			"batch_no": ln.batch_no,
@@ -2643,6 +2650,17 @@ def record_transfer_barcode_scan(stock_entry, barcode, confirm_unscan=0):
 		frappe.db.set_value("Stock Entry Detail", match.name, updates, update_modified=False)
 	if flt(match.qty) != approved_qty:
 		frappe.db.set_value("Stock Entry Detail", match.name, "qty", approved_qty, update_modified=False)
+
+	if cint(confirm_unscan):
+		order_fn = _stock_entry_order_code_fieldname()
+		order_code = _cstr(se.get(order_fn)) if order_fn else ""
+		log_removed_roll(
+			"Stock Entry",
+			se.name,
+			batch_label,
+			party_code=order_code,
+			item_code=_cstr(match.item_code),
+		)
 
 	return {
 		"ok": True,

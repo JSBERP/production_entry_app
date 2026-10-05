@@ -381,6 +381,11 @@ frappe.ui.form.on("Stock Entry", {
 			frm.doc.items.length > 0
 		) {
 			frm.add_custom_button(
+				__("Removed Rolls"),
+				() => _showTransferRemovedRolls(frm),
+				__("Actions")
+			);
+			frm.add_custom_button(
 				__("Approved Rolls"),
 				() => {
 					frappe.call({
@@ -424,6 +429,8 @@ frappe.ui.form.on("Stock Entry", {
 				});
 			}, __("Create"));
 		}
+
+		_refreshTransferLoad(frm);
 	},
 
 	before_submit(frm) {
@@ -456,6 +463,197 @@ frappe.ui.form.on("Stock Entry", {
 		_run_transfer_scan(frm, barcode);
 	},
 });
+
+const LOADING_API = "production_entry.production_planning.loading_session";
+
+function _clearTransferLoad(frm) {
+	if (frm._pe_load_tick) {
+		clearInterval(frm._pe_load_tick);
+		frm._pe_load_tick = null;
+	}
+	const $head = _transferLoadHead(frm);
+	if ($head) {
+		$head.find(".pe-load-clock, .pe-load-btns").remove();
+	}
+}
+
+function _transferLoadHead(frm) {
+	if (!frm.page || !frm.page.wrapper) return null;
+	const $head = $(frm.page.wrapper).find(".page-head").first();
+	return $head.length ? $head : null;
+}
+
+function _formatLoadHms(totalSeconds) {
+	const sec = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+	const h = Math.floor(sec / 3600);
+	const m = Math.floor((sec % 3600) / 60);
+	const s = sec % 60;
+	return [h, m, s].map((n) => String(n).padStart(2, "0")).join(":");
+}
+
+function _ensureTransferLoadHeader(frm) {
+	const $head = _transferLoadHead(frm);
+	if (!$head) return null;
+	let $clock = $head.find(".pe-load-clock");
+	if (!$clock.length) {
+		$clock = $('<span class="pe-load-clock">00:00:00</span>');
+		$clock.css({
+			marginLeft: "12px",
+			marginRight: "8px",
+			fontFamily: "ui-monospace, monospace",
+			fontWeight: "800",
+			fontSize: "15px",
+			color: "#14532d",
+			background: "#dcfce7",
+			border: "1px solid #86efac",
+			borderRadius: "8px",
+			padding: "4px 10px",
+			alignSelf: "center",
+			letterSpacing: "0.03em",
+		});
+		const $actions = $head.find(".page-actions").first();
+		if ($actions.length) $clock.insertBefore($actions);
+		else $head.append($clock);
+	}
+	let $btns = $head.find(".pe-load-btns");
+	if (!$btns.length) {
+		$btns = $('<span class="pe-load-btns"></span>');
+		$btns.css({
+			display: "inline-flex",
+			gap: "6px",
+			alignItems: "center",
+			marginRight: "8px",
+		});
+		const $actions = $head.find(".page-actions").first();
+		if ($actions.length) $actions.prepend($btns);
+		else $head.append($btns);
+	}
+	return { $clock, $btns };
+}
+
+function _paintTransferLoadClock(frm) {
+	const $head = _transferLoadHead(frm);
+	if (!$head) return;
+	const $clock = $head.find(".pe-load-clock");
+	if (!$clock.length) {
+		_paintTransferLoadButtons(frm);
+		return;
+	}
+	const session = frm._pe_load_session || {};
+	let sec = Number(session.elapsed_seconds) || 0;
+	if (session.status === "running" && frm._pe_load_session_at) {
+		sec += Math.max(0, (Date.now() - frm._pe_load_session_at) / 1000);
+	}
+	$clock.text(_formatLoadHms(sec));
+}
+
+function _paintTransferLoadButtons(frm) {
+	const ui = _ensureTransferLoadHeader(frm);
+	if (!ui) return;
+	const status = (frm._pe_load_session && frm._pe_load_session.status) || "idle";
+	const buttons = [];
+	if (status === "idle") {
+		buttons.push(["start", __("Start Loading"), "btn-success"]);
+		buttons.push(["pause", __("Pause Loading"), "btn-warning"]);
+		buttons.push(["stop", __("Stop Loading"), "btn-danger"]);
+	} else if (status === "running") {
+		buttons.push(["pause", __("Pause Loading"), "btn-warning"]);
+		buttons.push(["stop", __("Stop Loading"), "btn-danger"]);
+	} else if (status === "paused") {
+		buttons.push(["continue", __("Continue Loading"), "btn-info"]);
+		buttons.push(["stop", __("Stop Loading"), "btn-danger"]);
+	}
+	ui.$btns.empty();
+	buttons.forEach(([action, label, cls]) => {
+		const $b = $(`<button type="button" class="btn btn-sm ${cls}"></button>`).text(label);
+		$b.on("click", () => _setTransferLoad(frm, action));
+		ui.$btns.append($b);
+	});
+	const $removed = $(`<button type="button" class="btn btn-sm"></button>`).text(__("Removed Rolls"));
+	$removed.css({ background: "#b45309", color: "#fff" });
+	$removed.on("click", () => _showTransferRemovedRolls(frm));
+	ui.$btns.append($removed);
+	_paintTransferLoadClock(frm);
+}
+
+function _applyTransferLoadSession(frm, session) {
+	frm._pe_load_session = session || { status: "idle", elapsed_seconds: 0 };
+	frm._pe_load_session_at = Date.now();
+	_paintTransferLoadButtons(frm);
+	if (frm._pe_load_tick) clearInterval(frm._pe_load_tick);
+	frm._pe_load_tick = setInterval(() => _paintTransferLoadClock(frm), 1000);
+}
+
+function _refreshTransferLoad(frm) {
+	if (!_is_logistics_material_transfer(frm) || !frm.doc.name || frm.is_new() || frm.doc.docstatus !== 0) {
+		_clearTransferLoad(frm);
+		return;
+	}
+	frappe.call({
+		method: `${LOADING_API}.get_loading_session`,
+		args: { doctype: "Stock Entry", name: frm.doc.name },
+		callback(r) {
+			if (!_is_logistics_material_transfer(frm)) return;
+			_applyTransferLoadSession(frm, r.message);
+		},
+	});
+}
+
+function _setTransferLoad(frm, action) {
+	const status = (frm._pe_load_session && frm._pe_load_session.status) || "idle";
+	if ((action === "pause" || action === "stop") && status === "idle") {
+		frappe.show_alert({ message: __("Start loading first."), indicator: "orange" });
+		return;
+	}
+	frappe.call({
+		method: `${LOADING_API}.set_loading_session`,
+		args: { doctype: "Stock Entry", name: frm.doc.name, action },
+		callback(r) {
+			_applyTransferLoadSession(frm, r.message);
+		},
+	});
+}
+
+function _showTransferRemovedRolls(frm) {
+	if (!frm.doc.name) return;
+	frappe.call({
+		method: `${LOADING_API}.get_removed_rolls`,
+		args: { doctype: "Stock Entry", name: frm.doc.name },
+		freeze: true,
+		freeze_message: __("Loading removed rolls…"),
+		callback(r) {
+			const rolls = (r.message && r.message.rolls) || [];
+			const esc = (v) => frappe.utils.escape_html(String(v || "—"));
+			let html = `<p style="margin:8px 0;color:#64748b">${__("No rolls have been removed.")}</p>`;
+			if (rolls.length) {
+				const body = rolls
+					.map(
+						(row) => `<tr>
+							<td>${esc(row.batch_no)}</td>
+							<td>${esc(row.party_code)}</td>
+							<td>${esc(row.item_code)}</td>
+							<td>${esc(row.removed_by)}</td>
+							<td>${esc(row.removed_at)}</td>
+						</tr>`
+					)
+					.join("");
+				html = `<table class="table table-bordered table-sm" style="margin:0">
+					<thead><tr>
+						<th>${__("Roll")}</th>
+						<th>${__("Order")}</th>
+						<th>${__("Item")}</th>
+						<th>${__("Removed by")}</th>
+						<th>${__("Removed at")}</th>
+					</tr></thead>
+					<tbody>${body}</tbody>
+				</table>`;
+			}
+			const d = new frappe.ui.Dialog({ title: __("Removed Rolls"), size: "large" });
+			d.$body.html(html);
+			d.show();
+		},
+	});
+}
 
 frappe.ui.form.on("Stock Entry Detail", {
 	scanned_qty(frm, cdt, cdn) {

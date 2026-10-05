@@ -212,7 +212,7 @@
                 </thead>
                 <tbody
                   v-for="dateGroup in unitGroup.dates"
-                  :key="dateGroup.date"
+                  :key="dateGroup.key || dateGroup.date"
                   class="pt-sortable-body"
                   :data-unit="unitGroup.unit"
                   :data-date="dateGroup.date"
@@ -225,11 +225,19 @@
                             style="background-color: #fee2e2; border: 2px solid #dc2626;"
                           >
                             <td class="cell-center" style="color:#991b1b;">🔧</td>
-                            <td v-if="idx === 0" :rowspan="dateGroup.rows.length" class="cell-center font-bold">
-                              {{ formatDate(dateGroup.date) }}
+                            <td v-if="idx === 0" :rowspan="dateGroup.rows.length" class="cell-center font-bold" style="vertical-align: middle;">
+                              <div
+                                v-for="(d, dateIdx) in maintenanceCardDates(dateGroup)"
+                                :key="d"
+                                :style="dateIdx < maintenanceCardDates(dateGroup).length - 1 ? 'padding: 6px 4px; border-bottom: 1px solid #fecaca;' : 'padding: 6px 4px;'"
+                              >{{ formatDate(d) }}</div>
                             </td>
-                            <td v-if="idx === 0" :rowspan="dateGroup.rows.length" class="cell-center">
-                              {{ getDayName(dateGroup.date) }}
+                            <td v-if="idx === 0" :rowspan="dateGroup.rows.length" class="cell-center" style="vertical-align: middle;">
+                              <div
+                                v-for="(d, dateIdx) in maintenanceCardDates(dateGroup)"
+                                :key="d"
+                                :style="dateIdx < maintenanceCardDates(dateGroup).length - 1 ? 'padding: 6px 4px; border-bottom: 1px solid #fecaca;' : 'padding: 6px 4px;'"
+                              >{{ getDayName(d) }}</div>
                             </td>
                             <td :colspan="tableColCount(unitGroup.unit, unitGroup.dates) - 3" style="padding: 8px 12px; font-weight: 700; color: #991b1b; text-align: center;">
                               <div style="display: inline-flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;">
@@ -237,6 +245,7 @@
                                 <span v-if="row.maint.afterOrderCode" style="font-weight:600;color:#7f1d1d;">
                                   after {{ row.maint.afterOrderCode }} · {{ row.maint.afterQuality }} · {{ row.maint.afterColor }}
                                 </span>
+                                <button @click="openEditMaintenanceDialog(row.maint)" style="background: #fff; color: #991b1b; border: 1px solid #dc2626; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 11px;">Edit</button>
                                 <button @click="deleteMaintenanceRecord(row.maint.name)" style="background: #dc2626; color: white; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 11px;">Remove</button>
                               </div>
                             </td>
@@ -872,6 +881,106 @@ async function fetchMaintenanceRecords() {
 	}
 }
 
+function openEditMaintenanceDialog(maint) {
+  if (freezeMaintenance.value || !maint?.name) return;
+  const unit = maint.unit || "Unit 4";
+  const startDate = normalizeDateString(maint.startDate);
+  let afterOrderOptions = buildAfterOrderOptionsForDialog(unit, startDate);
+  const currentKey = encodeAfterOrderKey(maint.afterOrderCode, maint.afterQuality, maint.afterColor);
+  const currentLabel = maint.afterOrderCode
+    ? `${maint.afterOrderCode} · ${maint.afterQuality || ""} · ${maint.afterColor || ""}`
+    : afterOrderOptions[0]?.label || "";
+  if (maint.afterOrderCode && !afterOrderOptions.some((o) => o.value === currentKey)) {
+    afterOrderOptions.push({ value: currentKey, label: currentLabel });
+  }
+  const saved = (maintenanceRecords.value || []).find((r) => r.name === maint.name) || {};
+  const notes = String(saved.notes || "").split("MAINTENANCE_CASCADE_LOG::")[0].trim();
+  const d = new frappe.ui.Dialog({
+    title: "Edit Maintenance",
+    fields: [
+      { fieldtype: "Data", fieldname: "new_unit", label: "Unit", reqd: 1, read_only: 1, default: unit },
+      {
+        fieldtype: "Select",
+        fieldname: "maint_type",
+        label: "Maintenance Type",
+        options: "Mesh Change\nDie Change\nBreakdown - Partial\nBreakdown - Full\nEB Shutdown\nMachine Off",
+        reqd: 1,
+        default: maint.type,
+      },
+      { fieldtype: "Date", fieldname: "start_date", label: "Start Date", reqd: 1, default: startDate },
+      {
+        fieldtype: "Time",
+        fieldname: "start_time",
+        label: "Start Time",
+        description: "Optional. Blank = start of day (00:00)",
+        default: maint.startTime || "",
+      },
+      { fieldtype: "Date", fieldname: "end_date", label: "End Date", reqd: 1, default: normalizeDateString(maint.endDate) },
+      {
+        fieldtype: "Time",
+        fieldname: "end_time",
+        label: "End Time",
+        description: "Optional. Blank = end of day (23:59). Set 12:00 to open the afternoon and pull orders back.",
+        default: maint.endTime || "",
+      },
+      {
+        fieldtype: "Select",
+        fieldname: "after_order",
+        label: "After Order (Order Code · Quality · Colour)",
+        options: afterOrderOptions.map((o) => o.label).join("\n"),
+        default: currentLabel,
+      },
+      { fieldtype: "Small Text", fieldname: "notes", label: "Notes", default: notes },
+    ],
+    primary_action_label: "Save",
+    primary_action: async (vals) => {
+      const df = d.get_field("after_order");
+      const label = vals.after_order || "";
+      const key =
+        (df && df._after_order_map && df._after_order_map[label]) ||
+        (afterOrderOptions.find((o) => o.label === label)?.value ?? "");
+      const decoded = decodeAfterOrderKey(key);
+      try {
+        const res = await frappe.call({
+          method: "production_entry.production_planning.scheduler_api.update_equipment_maintenance",
+          args: {
+            name: maint.name,
+            unit: vals.new_unit,
+            maintenance_type: vals.maint_type,
+            start_date: vals.start_date,
+            end_date: vals.end_date,
+            start_time: vals.start_time || "",
+            end_time: vals.end_time || "",
+            after_order_code: decoded.code || "",
+            after_quality: decoded.quality || "",
+            after_color: decoded.color || "",
+            notes: vals.notes || "",
+          },
+        });
+        if (res.message && res.message.status === "success") {
+          frappe.show_alert({ message: res.message.message, indicator: "green" });
+          await fetchMaintenanceRecords();
+          await fetchData();
+          d.hide();
+        } else if (res.message && res.message.status === "error") {
+          frappe.msgprint(res.message.message || "Could not update maintenance");
+        }
+      } catch (e) {
+        frappe.msgprint("Error updating maintenance");
+        console.error(e);
+      }
+    },
+  });
+  const dfInit = d.get_field("after_order");
+  if (dfInit) {
+    dfInit._after_order_map = {};
+    afterOrderOptions.forEach((o) => {
+      dfInit._after_order_map[o.label] = o.value;
+    });
+  }
+  d.show();
+}
+
 async function deleteMaintenanceRecord(recordName) {
   if (!confirm('Remove this maintenance record?')) return;
 	try {
@@ -943,25 +1052,107 @@ function rowMatchesAfterOrder(row, maint) {
   );
 }
 
-function insertMaintenanceRowsIntoGroup(unit, group) {
-  const maintList = getMaintenanceForDate(group.date, unit) || [];
-  if (!maintList.length) return;
-  for (const maint of maintList) {
-    const maintRow = {
-      type: "maintenance",
-      rowKey: `maint-${maint.name}`,
-      maint,
-    };
-    if (maint.afterOrderCode) {
-      const idx = group.rows.findIndex((r) => r.type !== "maintenance" && rowMatchesAfterOrder(r, maint));
-      if (idx >= 0) {
-        group.rows.splice(idx + 1, 0, maintRow);
-        continue;
-      }
-    }
-    // No after-order (or order not found): show at top of the day.
-    group.rows.unshift(maintRow);
+function eachMaintenanceDateKey(startKey, endKey) {
+  const keys = [];
+  if (!startKey || !endKey) return keys;
+  const cur = new Date(`${startKey}T00:00:00`);
+  const end = new Date(`${endKey}T00:00:00`);
+  if (Number.isNaN(cur.getTime()) || Number.isNaN(end.getTime()) || cur > end) return keys;
+  while (cur <= end) {
+    keys.push(toLocalDateKeyFromDate(cur));
+    cur.setDate(cur.getDate() + 1);
   }
+  return keys;
+}
+
+function maintenanceCardDates(group) {
+  const dates = group?.spanDates || [];
+  if (dates.length) return dates;
+  return group?.date ? [group.date] : [];
+}
+
+function maintenanceRecordCard(rec) {
+  return {
+    name: rec.name,
+    type: rec.maintenance_type,
+    startDate: rec.start_date,
+    endDate: rec.end_date,
+    startTime: rec.start_time || "",
+    endTime: rec.end_time || "",
+    afterOrderCode: rec.after_order_code || "",
+    afterQuality: rec.after_quality || "",
+    afterColor: rec.after_color || "",
+    status: rec.status,
+    unit: rec.unit,
+  };
+}
+
+function placeMaintenanceCards(unit, dates) {
+  const range = getCurrentScopeDateRange();
+  const seen = new Set();
+  (maintenanceRecords.value || []).forEach((rec) => {
+    if (!maintenanceUnitsEqual(rec.unit, unit) || !rec?.name || seen.has(rec.name)) return;
+    seen.add(rec.name);
+    const start = normalizeDateString(rec.start_date);
+    const end = normalizeDateString(rec.end_date || rec.start_date);
+    const span = eachMaintenanceDateKey(start, end).filter((key) => {
+      if (!range) return true;
+      const dt = new Date(`${key}T00:00:00`);
+      return dt >= range.start && dt <= range.end;
+    });
+    if (!span.length) return;
+    const startGroupAt = dates.findIndex((g) => !g.maintenanceCard && normalizeDateString(g.date) === start);
+    const cardDates = startGroupAt >= 0 ? span.filter((key) => key !== start) : span.slice();
+    const shown = cardDates.length ? cardDates : span.slice();
+    const card = {
+      date: shown[0],
+      key: `maint-card-${rec.name}`,
+      maintenanceCard: true,
+      spanDates: shown,
+      items: [],
+      dailyTotal: 0,
+      dailyActualTotal: 0,
+      rows: [{
+        type: "maintenance",
+        rowKey: `maint-${rec.name}`,
+        maint: maintenanceRecordCard(rec),
+      }],
+    };
+    if (startGroupAt >= 0) {
+      const group = dates[startGroupAt];
+      const maint = card.rows[0].maint;
+      let anchorAt = -1;
+      if (maint.afterOrderCode) {
+        (group.rows || []).forEach((row, i) => {
+          if (row.type !== "maintenance" && rowMatchesAfterOrder(row, maint)) anchorAt = i;
+        });
+      }
+      if (anchorAt >= 0 && anchorAt < (group.rows || []).length - 1) {
+        const rest = group.rows.splice(anchorAt + 1);
+        const restQty = rest.reduce((sum, row) => {
+          if (row.type === "item") return sum + (parseFloat(row.item?.qty) || 0);
+          if (row.type === "merge") return sum + (parseFloat(row.totalTargetWeight) || 0);
+          return sum;
+        }, 0);
+        group.dailyTotal = Math.max((parseFloat(group.dailyTotal) || 0) - restQty, 0);
+        const restGroup = {
+          date: group.date,
+          key: `${normalizeDateString(group.date)}-after-${rec.name}`,
+          items: [],
+          dailyTotal: restQty,
+          dailyActualTotal: 0,
+          rows: rest,
+        };
+        dates.splice(startGroupAt + 1, 0, card, restGroup);
+      } else {
+        dates.splice(startGroupAt + 1, 0, card);
+      }
+    } else {
+      const at = dates.findIndex((g) => new Date(g.date).getTime() > new Date(`${shown[0]}T00:00:00`).getTime());
+      if (at < 0) dates.push(card);
+      else dates.splice(at, 0, card);
+    }
+  });
 }
 
 function buildAfterOrderOptionsForDialog(unit, dateStr) {
@@ -1020,13 +1211,20 @@ function getScopeMaintenanceDates(unit) {
   if (!range) return [];
 
   const out = [];
-  const cur = new Date(range.start);
-  while (cur <= range.end) {
-    const dateStr = toLocalDateKeyFromDate(cur);
-    if (getMaintenanceForDate(dateStr, unit)?.length) out.push(dateStr);
-    cur.setDate(cur.getDate() + 1);
-  }
-
+  const seen = new Set();
+  (maintenanceRecords.value || []).forEach((rec) => {
+    if (!maintenanceUnitsEqual(rec.unit, unit)) return;
+    const start = normalizeDateString(rec.start_date);
+    const end = normalizeDateString(rec.end_date || rec.start_date);
+    if (!start || !end) return;
+    for (const key of eachMaintenanceDateKey(start, end)) {
+      const dt = new Date(`${key}T00:00:00`);
+      if (dt < range.start || dt > range.end) continue;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(key);
+    }
+  });
   return out;
 }
 
@@ -2124,13 +2322,6 @@ const tableData = computed(() => {
             dateGroupsObj[d].dailyTotal += (item.qty || 0);
         });
 
-    // Ensure maintenance dates are visible even when there are zero orders on those dates.
-    for (const maintenanceDate of getScopeMaintenanceDates(unit)) {
-      if (!dateGroupsObj[maintenanceDate]) {
-        dateGroupsObj[maintenanceDate] = { date: maintenanceDate, items: [], dailyTotal: 0 };
-      }
-    }
-        
         const dates = Object.values(dateGroupsObj).sort((a, b) => new Date(a.date) - new Date(b.date));
         
         // Sort each date group individually using Board's exact queuing for that day
@@ -2227,8 +2418,9 @@ const tableData = computed(() => {
             });
 
             group.rows = rows;
-            insertMaintenanceRowsIntoGroup(unit, group);
         });
+
+        placeMaintenanceCards(unit, dates);
 
         const totalWeight = items.reduce((s, i) => s + (i.qty || 0), 0) / 1000;
 

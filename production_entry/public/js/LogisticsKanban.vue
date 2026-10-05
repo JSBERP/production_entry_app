@@ -244,6 +244,41 @@
                   <span v-if="!approvedArrangementLocked" class="lk-drag-grip lk-drag-grip-approved" title="Drag to reorder">⋮⋮</span>
                   <span class="lk-da-badge">{{ despatchCardBadge(da) }}</span>
                   <span class="lk-da-id">{{ da.clubbing_sheet || da.name }}</span>
+                  <span class="lk-load-clock" @click.stop>{{ formatLoadClock(da) }}</span>
+                </div>
+                <div class="lk-load-actions" @click.stop>
+                  <button
+                    v-if="loadStatus(da) === 'idle'"
+                    type="button"
+                    class="lk-load-btn lk-load-btn-start"
+                    @click="setDespatchLoad(da, 'start')"
+                  >
+                    Start Loading
+                  </button>
+                  <button
+                    v-if="loadStatus(da) === 'idle' || loadStatus(da) === 'running'"
+                    type="button"
+                    class="lk-load-btn lk-load-btn-pause"
+                    @click="setDespatchLoad(da, 'pause')"
+                  >
+                    Pause Loading
+                  </button>
+                  <button
+                    v-if="loadStatus(da) === 'paused'"
+                    type="button"
+                    class="lk-load-btn lk-load-btn-continue"
+                    @click="setDespatchLoad(da, 'continue')"
+                  >
+                    Continue Loading
+                  </button>
+                  <button
+                    v-if="loadStatus(da) !== 'stopped'"
+                    type="button"
+                    class="lk-load-btn lk-load-btn-stop"
+                    @click="setDespatchLoad(da, 'stop')"
+                  >
+                    Stop Loading
+                  </button>
                 </div>
                 <div class="lk-da-date-row" @click.stop>
                   <span class="lk-da-label">Despatch date</span>
@@ -255,6 +290,9 @@
                   />
                   <button type="button" class="lk-dn-btn lk-dn-btn-scan lk-view-rolls-btn" @click="viewDespatchRolls(da)">
                     View Rolls
+                  </button>
+                  <button type="button" class="lk-dn-btn lk-removed-rolls-btn" @click="viewRemovedRolls(da, 'Despatch Approval')">
+                    Removed Rolls
                   </button>
                 </div>
 
@@ -278,7 +316,7 @@
                     </div>
                     <div class="lk-da-row">
                       <span class="lk-da-label">Driver</span>
-                      <span class="lk-da-val">{{ da.driver || "—" }}</span>
+                      <span class="lk-da-val">{{ da.driver_name || da.driver || "—" }}</span>
                     </div>
                     <div class="lk-da-row">
                       <span class="lk-da-label">Driver Ph</span>
@@ -384,6 +422,47 @@
                       <span class="lk-da-label">Qty</span>
                       <span class="lk-da-val">{{ da.qty_total || 0 }} Kg</span>
                     </div>
+                    <div class="lk-da-row">
+                      <span class="lk-da-label">Vehicle</span>
+                      <span class="lk-da-val">{{ da.vehicle_no || "—" }}</span>
+                    </div>
+                    <div class="lk-da-row">
+                      <span class="lk-da-label">Loading sequence</span>
+                      <span class="lk-da-val">{{ despatchLoadingLabel(da) }}</span>
+                    </div>
+                    <div class="lk-da-row">
+                      <span class="lk-da-label">Driver</span>
+                      <span class="lk-da-val">{{ da.driver_name || da.driver || "—" }}</span>
+                    </div>
+                    <div class="lk-da-row">
+                      <span class="lk-da-label">Driver no.</span>
+                      <span class="lk-da-val">{{ da.driver_ph_no || "—" }}</span>
+                    </div>
+                  </div>
+                  <div v-if="da.dn_docstatus < 1 && !da.all_dns_submitted" class="lk-club-scan" @click.stop>
+                    <input
+                      :ref="(el) => setClubScanRef(da.name, el)"
+                      :value="clubScanInput[da.name] || ''"
+                      type="text"
+                      class="lk-input-text lk-club-scan-input"
+                      :placeholder="clubScanPlaceholder(da)"
+                      :disabled="!!da.has_draft_dns || da.card_status === 'Draft DN' || da.scan_complete"
+                      autocomplete="off"
+                      inputmode="none"
+                      @input="onClubScanTyped(da, $event)"
+                      @keydown.enter.prevent="submitClubScan(da)"
+                    />
+                    <button
+                      type="button"
+                      class="lk-dn-btn lk-dn-btn-scan"
+                      :disabled="!!da.has_draft_dns || da.card_status === 'Draft DN' || da.scan_complete"
+                      @click="openClubBarcodeScanner(da)"
+                    >
+                      Scan barcode
+                    </button>
+                  </div>
+                  <div v-if="!da.scan_complete" class="lk-club-scan-hint" @click.stop>
+                    Tap <b>Scan barcode</b> for camera. USB gun: scan into the box — auto-adds.
                   </div>
                   <button
                     v-if="da.dn_docstatus < 1"
@@ -435,6 +514,7 @@ import { boardActionFrozenStyle, isBoardActionFrozen } from "./board_access_ui.j
 
 const API = "production_entry.production_planning.transfer_logistics";
 const DESPATCH_API = "production_entry.production_planning.despatch_logistics";
+const LOADING_API = "production_entry.production_planning.loading_session";
 const lkBoardAccess = ref({
   unlimited: true,
   allowed_units: [],
@@ -915,7 +995,7 @@ async function loadDespatchCards() {
   }
   if ((filterOrderCode.value || "").trim()) args.order_code = filterOrderCode.value.trim();
   const r = await frappe.call({ method: `${DESPATCH_API}.get_despatch_company_cards`, args });
-  despatchCards.value = r.message || [];
+  despatchCards.value = stampDespatchLoadSessions(r.message || []);
   syncPendingOrderFromCards(despatchCards.value);
   syncApprovedOrderFromCards(despatchCards.value);
   await initDespatchSortables();
@@ -931,6 +1011,125 @@ function openDespatch(card) {
 function openDespatchApproval(name) {
   frappe.route_options = { approval: name };
   frappe.set_route("despatch-approval-dashboard");
+}
+
+const loadClockNow = ref(Date.now());
+let loadClockTimer = null;
+
+function stampDespatchLoadSessions(cards) {
+  const at = Date.now();
+  (cards || []).forEach((card) => {
+    ["pending_approvals", "approved_ready_dn", "approved_approvals", "despatched_approvals", "despatch_history"].forEach((key) => {
+      (card[key] || []).forEach((da) => {
+        if (da) da._load_session_at = at;
+      });
+    });
+  });
+  return cards || [];
+}
+
+function loadStatus(da) {
+  return (da?.load_session && da.load_session.status) || "idle";
+}
+
+function formatHms(totalSeconds) {
+  const sec = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  return [h, m, s].map((n) => String(n).padStart(2, "0")).join(":");
+}
+
+function formatLoadClock(da) {
+  const session = da?.load_session || {};
+  let sec = Number(session.elapsed_seconds) || 0;
+  if (session.status === "running" && da?._load_session_at) {
+    sec += Math.max(0, (loadClockNow.value - da._load_session_at) / 1000);
+  }
+  return formatHms(sec);
+}
+
+function applyDespatchLoadSession(name, session) {
+  const at = Date.now();
+  (despatchCards.value || []).forEach((card) => {
+    ["pending_approvals", "approved_ready_dn", "approved_approvals", "despatched_approvals", "despatch_history"].forEach((key) => {
+      (card[key] || []).forEach((da) => {
+        if (da && da.name === name) {
+          da.load_session = session;
+          da._load_session_at = at;
+        }
+      });
+    });
+  });
+  loadClockNow.value = at;
+}
+
+async function setDespatchLoad(da, action) {
+  if (!da?.name) return;
+  const status = loadStatus(da);
+  if ((action === "pause" || action === "stop") && status === "idle") {
+    frappe.show_alert({ message: __("Start loading first."), indicator: "orange" });
+    return;
+  }
+  try {
+    const r = await frappe.call({
+      method: `${LOADING_API}.set_loading_session`,
+      args: { doctype: "Despatch Approval", name: da.name, action },
+    });
+    applyDespatchLoadSession(da.name, r.message || { status: "idle", elapsed_seconds: 0 });
+  } catch (e) {
+    frappe.msgprint(formatClubScanError(e));
+  }
+}
+
+function removedRollsTable(rolls) {
+  const rows = rolls || [];
+  if (!rows.length) {
+    return `<p style="margin:8px 0;color:#64748b">${__("No rolls have been removed.")}</p>`;
+  }
+  const esc = (v) => frappe.utils.escape_html(String(v || "—"));
+  const body = rows
+    .map(
+      (row) => `<tr>
+        <td>${esc(row.batch_no)}</td>
+        <td>${esc(row.party_code)}</td>
+        <td>${esc(row.item_code)}</td>
+        <td>${esc(row.removed_by)}</td>
+        <td>${esc(row.removed_at)}</td>
+      </tr>`
+    )
+    .join("");
+  return `<table class="table table-bordered table-sm" style="margin:0">
+    <thead><tr>
+      <th>${__("Roll")}</th>
+      <th>${__("Order")}</th>
+      <th>${__("Item")}</th>
+      <th>${__("Removed by")}</th>
+      <th>${__("Removed at")}</th>
+    </tr></thead>
+    <tbody>${body}</tbody>
+  </table>`;
+}
+
+async function viewRemovedRolls(da, doctype) {
+  if (!da?.name) return;
+  try {
+    const r = await frappe.call({
+      method: `${LOADING_API}.get_removed_rolls`,
+      args: { doctype, name: da.name },
+      freeze: true,
+      freeze_message: __("Loading removed rolls…"),
+    });
+    const rolls = (r.message && r.message.rolls) || [];
+    const d = new frappe.ui.Dialog({
+      title: __("Removed Rolls"),
+      size: "large",
+    });
+    d.$body.html(removedRollsTable(rolls));
+    d.show();
+  } catch (e) {
+    frappe.msgprint(formatClubScanError(e));
+  }
 }
 
 function viewDespatchRolls(da) {
@@ -959,6 +1158,15 @@ function viewDespatchRolls(da) {
       frappe.msgprint(__("Roll print dialog not loaded — hard refresh (Ctrl+Shift+R)."));
     },
   });
+}
+
+function despatchLoadingLabel(da) {
+  const seqs = [];
+  (da.club_orders || []).forEach((ord) => {
+    const seq = String(ord.loading_sequence || "").trim();
+    if (seq && seqs.indexOf(seq) === -1) seqs.push(seq);
+  });
+  return seqs.join(", ") || "—";
 }
 
 function despatchCardBadge(da) {
@@ -1237,6 +1445,9 @@ onMounted(async () => {
   });
   loadCompanies();
   loadCards();
+  loadClockTimer = window.setInterval(() => {
+    loadClockNow.value = Date.now();
+  }, 1000);
   refreshTimer = window.setInterval(() => {
     if (showDialog.value || showDespatchDialog.value) return;
     if (despatchSortableBusy.value) return;
@@ -1250,6 +1461,10 @@ onUnmounted(() => {
   if (refreshTimer) {
     window.clearInterval(refreshTimer);
     refreshTimer = null;
+  }
+  if (loadClockTimer) {
+    window.clearInterval(loadClockTimer);
+    loadClockTimer = null;
   }
 });
 
@@ -1795,6 +2010,37 @@ watch([despatchArrangementLocked, approvedArrangementLocked, mode], () => {
   font-family: ui-monospace, monospace;
   color: #334155;
 }
+.lk-load-clock {
+  margin-left: 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 800;
+  color: #14532d;
+  background: #dcfce7;
+  border: 1px solid #86efac;
+  border-radius: 6px;
+  padding: 2px 8px;
+  letter-spacing: 0.03em;
+}
+.lk-load-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 2px 0 6px;
+}
+.lk-load-btn {
+  border: none;
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  cursor: pointer;
+}
+.lk-load-btn-start { background: #16a34a; }
+.lk-load-btn-pause { background: #d97706; }
+.lk-load-btn-continue { background: #0284c7; }
+.lk-load-btn-stop { background: #dc2626; }
 .lk-da-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1989,6 +2235,14 @@ watch([despatchArrangementLocked, approvedArrangementLocked, mode], () => {
 }
 .lk-view-rolls-btn {
   margin-left: auto;
+  font-size: 11px !important;
+  padding: 4px 8px !important;
+  flex: 0 0 auto;
+  align-self: center;
+  height: 32px;
+}
+.lk-removed-rolls-btn {
+  background: #b45309 !important;
   font-size: 11px !important;
   padding: 4px 8px !important;
   flex: 0 0 auto;

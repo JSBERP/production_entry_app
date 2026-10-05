@@ -7,12 +7,21 @@ const PLANNING_BAG_FG_PREFIXES = new Set([
 	'231', '232', '233', '241', '242', '225', '226',
 ]);
 
-const PLANNING_ITEM_KNOWN_PREFIXES = new Set([
+const PLANNING_STOCK_CHECK_PROCESSES = new Set([
 	'100', '102', '103', '104', '105', '106', '107', '108', '109',
-	'200', '201', '202', '203',
+	'113',
+	'200', '201', '202', '203', '204', '205',
 	'211', '212', '213', '214', '216', '217',
-	'221', '222', '223', '224', '231', '232', '233', '241', '242', '225', '226',
-	'251', '252', '253', '254', '255',
+	'221', '222', '223', '224',
+	'231', '232', '233',
+	'241', '242', '243',
+	'251', '252', '253', '254', '255', '256',
+	'325', '326',
+]);
+
+const PLANNING_ITEM_KNOWN_PREFIXES = new Set([
+	...PLANNING_STOCK_CHECK_PROCESSES,
+	'225', '226',
 ]);
 
 const PLANNING_BAG_BOM_PREFIXES = new Set(['100', '102', '103', '104', '105', '106', '107', '108', '109']);
@@ -52,8 +61,21 @@ function planning_sheet_has_bag_bom_rows(frm) {
 	return false;
 }
 
+function planning_sheet_row_excluded_from_stock(row) {
+	const ic = (row.item_code || '').trim().toUpperCase();
+	const name = `${row.item_name || ''} ${row.item_code || ''} ${row.quality || ''}`.toUpperCase().replace(/[-\s]/g, '');
+	if (ic.startsWith('PB') || ic.includes('-PB-')) return true;
+	if (name.includes('OEKOTEX')) return true;
+	return false;
+}
+
 function planning_sheet_is_stock_check_eligible(frm) {
-	return planning_sheet_has_bag_fg(frm) || planning_sheet_has_bag_bom_rows(frm);
+	const rows = [...(frm.doc.items || []), ...(frm.doc.planned_items || [])];
+	for (const r of rows) {
+		if (planning_sheet_row_excluded_from_stock(r)) continue;
+		if (PLANNING_STOCK_CHECK_PROCESSES.has(planning_sheet_item_process_prefix(r.item_code))) return true;
+	}
+	return false;
 }
 
 function planning_sheet_toggle_stock_mode_field(frm) {
@@ -102,7 +124,7 @@ function planning_sheet_stock_build_inquiry_html(ctx, mode) {
 			&nbsp;|&nbsp; ${__('Eligible rows')}: ${ctx.eligible_count || 0}
 			&nbsp;|&nbsp; ${__('Sufficient')}: ${ctx.sufficient_count || 0}
 		</p>
-		<p class="text-muted small">${__('Stock movement is applied only after you confirm in the next step.')}</p>`;
+		<p class="text-muted small">${__('Pick the item you already have in stock. That row and every earlier BOM row on the same order leave production. The next process stays open. Nothing is saved until you confirm.')}</p>`;
 	for (const grp of (ctx.groups || [])) {
 		html += `<div class="stock-check-so-group" style="margin-bottom:12px;">
 			<h6 style="margin:8px 0 4px;">${__('SO line')}: ${planning_sheet_stock_esc(grp.sales_order_item)}</h6>`;
@@ -299,7 +321,7 @@ function open_planning_sheet_stock_check_dialog(frm) {
 			const ctx = r.message || {};
 			const mode = frm.doc.custom_stock_check_mode || ctx.stock_check_mode || 'Manual';
 			const d = new frappe.ui.Dialog({
-				title: __('Check Stock — Bag BOM'),
+				title: __('Check Stock'),
 				size: 'extra-large',
 				fields: [{ fieldtype: 'HTML', fieldname: 'body' }],
 			});

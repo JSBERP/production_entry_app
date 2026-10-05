@@ -466,7 +466,7 @@ function show_dialog(ctx, existing, frm) {
 			{ fieldtype: "Column Break" },
 			{
 				fieldname: "masterbatch_item",
-				label: __("Masterbatch"),
+				label: __("Colour Masterbatch"),
 				fieldtype: "Link",
 				options: "Item",
 				get_query: () => ({ filters: { item_code: ["like", "MB -%"] } }),
@@ -1010,7 +1010,7 @@ function render_set_html(set, si, ctx, state, readOnly) {
 					: "",
 			extras_headers_html(set, useLd ? "LD" : "Filler"),
 			has_material(m, "Masterbatch")
-				? `<th>${frappe.utils.escape_html(names.Masterbatch || m.Masterbatch || __("Masterbatch"))} (kg)</th>`
+				? `<th>${frappe.utils.escape_html(names.Masterbatch || m.Masterbatch || __("Colour Masterbatch"))} (kg)</th>`
 				: "",
 			extras_headers_html(set, "Masterbatch"),
 			has_material(m, "Antistatic")
@@ -1041,7 +1041,7 @@ function render_set_html(set, si, ctx, state, readOnly) {
 		: `<button class="btn btn-xs btn-danger btn-del-set" data-set="${si}" style="margin-left:auto">🗑 ${__("Delete Set")}</button>`;
 	const copyBtns = readOnly
 		? ""
-		: [1, 3, 5]
+		: [1, 3]
 				.map(
 					(n) =>
 						`<button type="button" class="btn btn-xs btn-default btn-copy-first-row" data-set="${si}" data-times="${n}">x${n}</button>`

@@ -15,11 +15,61 @@ from production_entry.production_planning.scheduler_api import (
 	MOVEMENT_STOCK,
 	MOVEMENT_TRANSFER,
 	PLANNING_MOVEMENT_TYPE_FIELD,
+	_bom_item_process_code,
+	_is_printed_bopp_item_code,
+	_item_process_prefix,
 	_planning_row_sort_key,
 	_production_sort_rank,
 	_same_fg_design_family,
 	_so_line_order_and_fg_map,
-	_item_process_prefix,
+)
+
+# Operator can cover these from warehouse stock.
+# 100 is the base fabric: stock there skips fabric production and the next process stays open.
+# Printed BOPP and Oeko-Tex non woven are never offered.
+STOCK_CHECK_PROCESSES = frozenset(
+	{
+		"100",
+		"102",
+		"103",
+		"104",
+		"105",
+		"106",
+		"107",
+		"108",
+		"109",
+		"113",
+		"200",
+		"201",
+		"202",
+		"203",
+		"204",
+		"205",
+		"211",
+		"212",
+		"213",
+		"214",
+		"216",
+		"217",
+		"221",
+		"222",
+		"223",
+		"224",
+		"231",
+		"232",
+		"233",
+		"241",
+		"242",
+		"243",
+		"251",
+		"252",
+		"253",
+		"254",
+		"255",
+		"256",
+		"325",
+		"326",
+	}
 )
 
 
@@ -60,6 +110,39 @@ def should_skip_movement_restamp(row_name: str, doctype: str = "Planning Table")
 
 def _soi_key(row) -> str:
 	return _cstr(row.get("sales_order_item") or row.get("so_item"))
+
+
+def _is_oekotex_nonwoven(row) -> bool:
+	blob = " ".join(
+		[
+			_cstr(row.get("item_name")),
+			_cstr(row.get("item_code")),
+			_cstr(row.get("quality")),
+		]
+	).upper().replace("-", "").replace(" ", "")
+	return "OEKOTEX" in blob
+
+
+def _stock_check_excluded(row) -> bool:
+	ic = _cstr(row.get("item_code"))
+	if not ic:
+		return True
+	if _is_printed_bopp_item_code(ic) or ic.upper().startswith("PB"):
+		return True
+	if _is_oekotex_nonwoven(row):
+		return True
+	return False
+
+
+def _stock_check_process(row) -> str:
+	ic = _cstr(row.get("item_code"))
+	return _cstr(_item_process_prefix(ic) or _bom_item_process_code(ic))
+
+
+def _stock_check_row_allowed(row) -> bool:
+	if _stock_check_excluded(row):
+		return False
+	return _stock_check_process(row) in STOCK_CHECK_PROCESSES
 
 
 def _planning_sheet_has_bag_fg(planning_sheet_name: str) -> bool:
@@ -238,12 +321,12 @@ def _board_label_for_process(proc: str) -> str:
 
 
 def _build_stock_row_context(row, so_fg_by_soi, so_line_order, parent_first=False) -> dict | None:
-	if _is_despatch_fg_row(row, so_fg_by_soi):
+	if not _stock_check_row_allowed(row):
 		return None
 	ic = _cstr(row.get("item_code"))
 	if not ic:
 		return None
-	proc = _item_process_prefix(ic)
+	proc = _stock_check_process(row)
 	required = flt(row.get("qty") or 0)
 	batches = query_batches_all_warehouses(ic)
 	total_avail = flt(sum(flt(b.get("qty") or 0) for b in batches), 3)
@@ -285,9 +368,9 @@ def get_planning_sheet_stock_check_context(planning_sheet_name: str | None = Non
 	planning_sheet_name = _cstr(planning_sheet_name)
 	if not planning_sheet_name or not frappe.db.exists("Planning sheet", planning_sheet_name):
 		frappe.throw(_("Planning Sheet not found."), title=_("Stock Check"))
-	if not _planning_sheet_has_bag_fg(planning_sheet_name):
+	if not any(_stock_check_row_allowed(row) for row in _load_planning_table_rows(planning_sheet_name)):
 		frappe.throw(
-			_("This Planning Sheet has no Box Bag / W-CUT / D-CUT FG lines. Stock check applies to bag sheets only."),
+			_("This Planning Sheet has no rows that can be covered from stock."),
 			title=_("Stock Check"),
 		)
 	so_name = frappe.db.get_value("Planning sheet", planning_sheet_name, "sales_order")
@@ -336,6 +419,8 @@ def _cascade_descendant_row_names(parent_row: dict, all_rows: list[dict]) -> lis
 		if _cstr(r.get("name")) == _cstr(parent_row.get("name")):
 			continue
 		if _production_sort_rank(r.get("item_code")) >= parent_rank:
+			continue
+		if not _stock_check_row_allowed(r):
 			continue
 		out.append(r.get("name"))
 	return out
