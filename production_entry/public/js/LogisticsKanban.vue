@@ -1082,33 +1082,78 @@ async function setDespatchLoad(da, action) {
   }
 }
 
-function removedRollsTable(rolls) {
+function removedRollsTable(rolls, orderCode) {
   const rows = rolls || [];
+  const esc = (v) => frappe.utils.escape_html(v == null || v === "" ? "" : String(v));
+  const num = (v) => {
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const orders = [];
+  rows.forEach((r) => {
+    const oc = String(r.party_code || r.order_code || "").trim();
+    if (oc && orders.indexOf(oc) === -1) orders.push(oc);
+  });
+  const orderLabel = String(orderCode || orders.join(", ") || "").trim();
+  let html =
+    "<style>" +
+    ".rr-wrap{font-family:Arial,sans-serif;color:#000;background:#fff}" +
+    ".rr-head{width:100%;border-collapse:collapse;border:2px solid #2e7d32;margin-bottom:10px}" +
+    ".rr-head td{padding:10px;text-align:center}" +
+    ".rr-head img{height:60px;width:auto;margin-bottom:5px}" +
+    ".rr-title{font-size:11px;font-weight:bold;text-transform:uppercase;border-top:1px solid #ccc;margin-top:5px;padding-top:5px}" +
+    ".rr-table{width:100%;border-collapse:collapse;border:1px solid #000;font-size:11px}" +
+    ".rr-table th{background:#ffb74d;border:1px solid #000;padding:6px;font-weight:700;text-transform:uppercase;text-align:center}" +
+    ".rr-table td{border:1px solid #000;padding:5px 6px;text-align:center}" +
+    ".rr-table tfoot td{background:#c8e6c9;border:1px solid #000;font-weight:bold;color:#1b5e20;text-align:center}" +
+    "</style>" +
+    '<div class="rr-wrap"><table class="rr-head"><tr><td>' +
+    '<img src="/files/JSb.jpg59172c.jpeg" alt="JSB Logo"><br>' +
+    '<div class="rr-title">' + __("Removed Rolls") + (orderLabel ? " | " + esc(orderLabel) : "") + "</div>" +
+    "</td></tr></table>";
   if (!rows.length) {
-    return `<p style="margin:8px 0;color:#64748b">${__("No rolls have been removed.")}</p>`;
+    return html + `<p style="margin:12px 0;text-align:center;color:#64748b">${__("No rolls have been removed.")}</p></div>`;
   }
-  const esc = (v) => frappe.utils.escape_html(String(v || "—"));
+  let totalMtr = 0;
+  let totalNet = 0;
+  let totalGross = 0;
   const body = rows
-    .map(
-      (row) => `<tr>
-        <td>${esc(row.batch_no)}</td>
-        <td>${esc(row.party_code)}</td>
-        <td>${esc(row.item_code)}</td>
-        <td>${esc(row.removed_by)}</td>
-        <td>${esc(row.removed_at)}</td>
-      </tr>`
-    )
+    .map((row, i) => {
+      const mtr = num(row.meter_per_roll || row.meter_roll);
+      const net = num(row.net_weight || row.qty);
+      const gross = num(row.gross_weight || net);
+      const gsm = num(row.gsm);
+      const width = num(row.width_inch);
+      totalMtr += mtr;
+      totalNet += net;
+      totalGross += gross;
+      const when = String(row.removed_at || "").replace("T", " ").replace(/\.\d+$/, "");
+      return `<tr>
+        <td>${i + 1}</td>
+        <td>${esc(row.party_code || row.order_code || "—")}</td>
+        <td style="font-weight:700">${esc(row.batch_no)}</td>
+        <td>${esc(row.quality)}</td>
+        <td>${esc(row.color)}</td>
+        <td>${gsm ? gsm : ""}</td>
+        <td>${width ? width : "-"}</td>
+        <td>${mtr.toFixed(1)}</td>
+        <td>${net.toFixed(2)}</td>
+        <td>${gross.toFixed(2)}</td>
+        <td>${esc(row.removed_by || "—")}</td>
+        <td>${esc(when || "—")}</td>
+      </tr>`;
+    })
     .join("");
-  return `<table class="table table-bordered table-sm" style="margin:0">
-    <thead><tr>
-      <th>${__("Roll")}</th>
-      <th>${__("Order")}</th>
-      <th>${__("Item")}</th>
-      <th>${__("Removed by")}</th>
-      <th>${__("Removed at")}</th>
-    </tr></thead>
-    <tbody>${body}</tbody>
-  </table>`;
+  html += `<table class="rr-table"><thead><tr>
+      <th>#</th><th>${__("Order Code")}</th><th>${__("Batch No")}</th><th>${__("Quality")}</th>
+      <th>${__("Color")}</th><th>${__("GSM")}</th><th>${__("Width (Inches)")}</th><th>${__("Mtrs")}</th>
+      <th>${__("Net Wt")}</th><th>${__("Gross Wt")}</th><th>${__("Removed By")}</th><th>${__("Removed At")}</th>
+    </tr></thead><tbody>${body}</tbody>
+    <tfoot><tr>
+      <td colspan="7">${__("TOTAL CONSOLIDATED DESPATCH")}</td>
+      <td>${totalMtr.toFixed(1)}</td><td>${totalNet.toFixed(2)}</td><td>${totalGross.toFixed(2)}</td><td></td><td></td>
+    </tr></tfoot></table></div>`;
+  return html;
 }
 
 async function viewRemovedRolls(da, doctype) {
@@ -1121,18 +1166,11 @@ async function viewRemovedRolls(da, doctype) {
       freeze_message: __("Loading removed rolls…"),
     });
     const rolls = (r.message && r.message.rolls) || [];
-    if (typeof jsb_show_removed_rolls_dialog === "function") {
-      jsb_show_removed_rolls_dialog({
-        rolls,
-        order_code: da.order_codes_label || "",
-      });
-      return;
-    }
     const d = new frappe.ui.Dialog({
       title: __("Removed Rolls"),
       size: "extra-large",
     });
-    d.$body.html(removedRollsTable(rolls));
+    d.$body.html(removedRollsTable(rolls, da.order_codes_label || ""));
     d.show();
   } catch (e) {
     frappe.msgprint(formatClubScanError(e));
