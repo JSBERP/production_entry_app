@@ -535,6 +535,56 @@ def _roll_details_for_batch(batch_no, party_code="", item_code="", parent_doctyp
 	}
 
 
+def _specs_from_parent_roll_list(doctype, name):
+	"""Reuse the same roll list View Rolls / Approved Rolls already shows."""
+	by_batch = {}
+	payload = {}
+	try:
+		if doctype == "Despatch Approval":
+			from production_entry.production_planning.despatch_logistics import get_despatch_approval_roll_list
+
+			payload = get_despatch_approval_roll_list(name) or {}
+		elif doctype == "Stock Entry":
+			from production_entry.production_planning.transfer_logistics import get_transfer_approval_roll_list
+
+			payload = get_transfer_approval_roll_list(stock_entry=name) or {}
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "removed roll spec lookup")
+		return by_batch
+	for roll in payload.get("rolls") or []:
+		batch_no = (roll.get("batch_no") or "").strip()
+		if batch_no:
+			by_batch[batch_no] = roll
+	return by_batch
+
+
+def _apply_roll_specs(entry, details, matched=None):
+	"""Fill blank removed-roll columns from the parent roll list, then the batch lookup."""
+	matched = matched or {}
+	details = details or {}
+	for key in (
+		"item_code",
+		"quality",
+		"color",
+		"gsm",
+		"width_inch",
+		"meter_per_roll",
+		"net_weight",
+		"gross_weight",
+	):
+		current = entry.get(key)
+		incoming = matched.get(key)
+		if incoming in (None, "", 0, 0.0):
+			incoming = details.get(key)
+		if incoming in (None, "", 0, 0.0):
+			continue
+		if current in (None, "", 0, 0.0):
+			entry[key] = incoming
+	if not flt(entry.get("gross_weight")) and flt(entry.get("net_weight")):
+		entry["gross_weight"] = flt(entry.get("net_weight"))
+	return entry
+
+
 def _removed_roll_log_rows(doctype, name):
 	if not frappe.db.exists("DocType", "Removed Roll Log") or not frappe.db.table_exists("Removed Roll Log"):
 		return []
@@ -558,6 +608,7 @@ def get_removed_rolls(doctype=None, name=None):
 	rows.extend(_removed_roll_log_rows(doctype, name))
 	clean = []
 	seen = set()
+	parent_specs = _specs_from_parent_roll_list(doctype, name)
 	for row in rows:
 		if not isinstance(row, dict):
 			continue
@@ -575,15 +626,14 @@ def get_removed_rolls(doctype=None, name=None):
 			continue
 		seen.add(key)
 		logged_party = entry.get("party_code") or ""
-		entry.update(
-			_roll_details_for_batch(
-				entry["batch_no"],
-				logged_party,
-				entry.get("item_code"),
-				doctype,
-				name,
-			)
+		details = _roll_details_for_batch(
+			entry["batch_no"],
+			logged_party,
+			entry.get("item_code"),
+			doctype,
+			name,
 		)
+		_apply_roll_specs(entry, details, parent_specs.get(entry["batch_no"]))
 		if logged_party:
 			entry["party_code"] = logged_party
 		clean.append(entry)

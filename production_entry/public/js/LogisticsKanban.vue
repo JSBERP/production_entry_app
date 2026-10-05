@@ -1156,6 +1156,25 @@ function removedRollsTable(rolls, orderCode) {
   return html;
 }
 
+function mergeRemovedRollSpecs(removed, sourceRolls) {
+  const byBatch = {};
+  (sourceRolls || []).forEach((row) => {
+    const batch = String(row.batch_no || "").trim();
+    if (batch) byBatch[batch] = row;
+  });
+  return (removed || []).map((row) => {
+    const match = byBatch[String(row.batch_no || "").trim()] || {};
+    const next = Object.assign({}, row);
+    ["quality", "color", "gsm", "width_inch", "meter_per_roll", "net_weight", "gross_weight", "item_code"].forEach((key) => {
+      const current = next[key];
+      const incoming = match[key];
+      const empty = current == null || current === "" || current === 0 || current === "0";
+      if (empty && incoming != null && incoming !== "" && incoming !== 0) next[key] = incoming;
+    });
+    return next;
+  });
+}
+
 async function viewRemovedRolls(da, doctype) {
   if (!da?.name) return;
   try {
@@ -1165,7 +1184,14 @@ async function viewRemovedRolls(da, doctype) {
       freeze: true,
       freeze_message: __("Loading removed rolls…"),
     });
-    const rolls = (r.message && r.message.rolls) || [];
+    let rolls = (r.message && r.message.rolls) || [];
+    if (doctype === "Despatch Approval") {
+      const spec = await frappe.call({
+        method: `${DESPATCH_API}.get_despatch_approval_roll_list`,
+        args: { approval_name: da.name },
+      });
+      rolls = mergeRemovedRollSpecs(rolls, (spec.message && spec.message.rolls) || []);
+    }
     const d = new frappe.ui.Dialog({
       title: __("Removed Rolls"),
       size: "extra-large",
@@ -1191,18 +1217,101 @@ function viewDespatchRolls(da) {
         frappe.msgprint(__("No batches selected on this Despatch Approval."));
         return;
       }
-      if (typeof jsb_show_despatch_rolls_dialog === "function") {
-		jsb_show_despatch_rolls_dialog({
-          rolls,
-          order_code: da.order_codes_label || "",
-          sales_order: da.order_codes_label || da.clubbing_sheet || da.name,
-          delivery_note: (da.delivery_notes && da.delivery_notes[0]) || da.delivery_note || "",
-        });
-        return;
-      }
-      frappe.msgprint(__("Roll print dialog not loaded — hard refresh (Ctrl+Shift+R)."));
+      showKanbanDespatchRolls(rolls, da);
     },
   });
+}
+
+function showKanbanDespatchRolls(rolls, da) {
+  const esc = (v) => frappe.utils.escape_html(v == null || v === "" ? "" : String(v));
+  const num = (v) => {
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const orderCode = String(da.order_codes_label || "").trim();
+  const today = frappe.datetime.nowdate();
+  let totalMtr = 0;
+  let totalNet = 0;
+  let totalGross = 0;
+  const body = (rolls || [])
+    .map((row, i) => {
+      const mtr = num(row.meter_per_roll || row.meter_roll);
+      const net = num(row.net_weight || row.qty);
+      const gross = num(row.gross_weight || net);
+      const gsm = num(row.gsm);
+      const width = num(row.width_inch);
+      totalMtr += mtr;
+      totalNet += net;
+      totalGross += gross;
+      return `<tr>
+        <td>${i + 1}</td>
+        <td>${esc(row.party_code || orderCode || "—")}</td>
+        <td style="font-weight:700">${esc(row.batch_no)}</td>
+        <td>${esc(row.quality)}</td>
+        <td>${esc(row.color)}</td>
+        <td>${gsm ? gsm : ""}</td>
+        <td>${width ? width : "-"}</td>
+        <td>${mtr.toFixed(1)}</td>
+        <td>${net.toFixed(2)}</td>
+        <td>${gross.toFixed(2)}</td>
+      </tr>`;
+    })
+    .join("");
+  const html =
+    "<style>" +
+    ".vr-wrap{font-family:Arial,sans-serif;color:#000;background:#fff}" +
+    ".vr-head{width:100%;border-collapse:collapse;border:2px solid #2e7d32;margin-bottom:10px}" +
+    ".vr-head td{padding:10px;text-align:center}" +
+    ".vr-head img{height:60px;width:auto;margin-bottom:5px}" +
+    ".vr-title{font-size:11px;font-weight:bold;text-transform:uppercase;border-top:1px solid #ccc;margin-top:5px;padding-top:5px}" +
+    ".vr-info{width:100%;border-collapse:collapse;margin-bottom:10px}" +
+    ".vr-info td{border:1px solid #555;padding:0;text-align:center}" +
+    ".vr-label{background:#f57f17;color:#fff;font-size:8px;font-weight:700;text-transform:uppercase;padding:2px 5px}" +
+    ".vr-value{font-size:11px;font-weight:700;padding:4px 5px}" +
+    ".vr-table{width:100%;border-collapse:collapse;border:1px solid #000;font-size:11px}" +
+    ".vr-table th{background:#ffb74d;border:1px solid #000;padding:6px;font-weight:700;text-transform:uppercase;text-align:center}" +
+    ".vr-table td{border:1px solid #000;padding:5px 6px;text-align:center}" +
+    ".vr-table tfoot td{background:#c8e6c9;border:1px solid #000;font-weight:bold;color:#1b5e20;text-align:center}" +
+    "</style>" +
+    '<div class="vr-wrap"><table class="vr-head"><tr><td>' +
+    '<img src="/files/JSb.jpg59172c.jpeg" alt="JSB Logo"><br>' +
+    '<div class="vr-title">' + __("Despatch Roll List") + (orderCode ? " | " + esc(orderCode) : "") + "</div>" +
+    "</td></tr></table>" +
+    '<table class="vr-info"><tr>' +
+    `<td><div class="vr-label">${__("Date")}</div><div class="vr-value">${esc(today)}</div></td>` +
+    `<td><div class="vr-label">${__("Order Code")}</div><div class="vr-value">${esc(orderCode || "—")}</div></td>` +
+    `<td><div class="vr-label">${__("No. of Rolls")}</div><div class="vr-value">${rolls.length}</div></td>` +
+    `<td><div class="vr-label">${__("Report Type")}</div><div class="vr-value">${__("Order-Wise")}</div></td>` +
+    "</tr></table>" +
+    `<table class="vr-table"><thead><tr>
+      <th>#</th><th>${__("Order Code")}</th><th>${__("Batch No")}</th><th>${__("Quality")}</th>
+      <th>${__("Color")}</th><th>${__("GSM")}</th><th>${__("Width (Inches)")}</th><th>${__("Mtrs")}</th>
+      <th>${__("Net Wt")}</th><th>${__("Gross Wt")}</th>
+    </tr></thead><tbody>${body}</tbody>
+    <tfoot><tr>
+      <td colspan="7">${__("TOTAL CONSOLIDATED DESPATCH")}</td>
+      <td>${totalMtr.toFixed(1)}</td><td>${totalNet.toFixed(2)}</td><td>${totalGross.toFixed(2)}</td>
+    </tr></tfoot></table></div>`;
+  const d = new frappe.ui.Dialog({
+    title: orderCode ? __("Rolls for Order Code: {0}", [orderCode]) : __("Rolls"),
+    size: "extra-large",
+    primary_action_label: __("Print for Despatch"),
+    primary_action() {
+      const printWindow = window.open("", "_blank");
+      if (!printWindow) return;
+      printWindow.document.write("<html><head><title>Roll List</title>");
+      printWindow.document.write("<style>@page { size: A4 portrait; margin: 10mm; }</style>");
+      printWindow.document.write(html);
+      printWindow.document.write("</body></html>");
+      printWindow.document.close();
+      setTimeout(() => {
+        printWindow.print();
+        printWindow.close();
+      }, 500);
+    },
+  });
+  d.$body.html(html);
+  d.show();
 }
 
 function despatchLoadingLabel(da) {
