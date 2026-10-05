@@ -146,31 +146,58 @@ _FIELD_DEFS = {
 }
 
 
+def _column_exists(doctype, fieldname):
+	"""Read the live table, not Frappe's cached column list."""
+	table = f"tab{doctype}"
+	try:
+		found = frappe.db.sql(
+			"""
+			select 1
+			from information_schema.columns
+			where table_schema = database()
+			  and table_name = %s
+			  and column_name = %s
+			limit 1
+			""",
+			(table, fieldname),
+		)
+	except Exception:
+		return bool(frappe.db.has_column(doctype, fieldname))
+	return bool(found)
+
+
+def _bust_column_cache(doctype):
+	frappe.clear_cache(doctype=doctype)
+	local_cols = getattr(frappe.local, "table_columns", None)
+	if isinstance(local_cols, dict):
+		local_cols.pop(doctype, None)
+		local_cols.pop(f"tab{doctype}", None)
+	try:
+		frappe.cache().delete_value(f"table_columns::{doctype}")
+	except Exception:
+		pass
+
+
 def ensure_loading_fields():
 	"""Create hidden timer and removed-roll fields when they are not on the site yet."""
 	pending = {}
 	for dt, fields in _FIELD_DEFS.items():
 		if not frappe.db.exists("DocType", dt):
 			continue
-		missing = []
-		for f in fields:
-			if frappe.db.has_column(dt, f["fieldname"]):
-				continue
-			if frappe.db.exists("Custom Field", {"dt": dt, "fieldname": f["fieldname"]}):
-				continue
-			missing.append(f)
+		missing = [f for f in fields if not _column_exists(dt, f["fieldname"])]
 		if missing:
 			pending[dt] = missing
-	if not pending:
-		return True
-	try:
-		create_custom_fields(pending, ignore_validate=True, update=False)
-		frappe.clear_cache()
-	except Exception:
-		frappe.log_error(frappe.get_traceback(), "ensure_loading_fields")
-		return False
+	if pending:
+		try:
+			create_custom_fields(pending, ignore_validate=True, update=True)
+			for dt in pending:
+				frappe.db.updatedb(dt)
+				_bust_column_cache(dt)
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), "ensure_loading_fields")
+			return False
 	return all(
-		frappe.db.has_column(dt, f["fieldname"])
+		_column_exists(dt, f["fieldname"])
 		for dt, fields in _FIELD_DEFS.items()
 		if frappe.db.exists("DocType", dt)
 		for f in fields
@@ -373,6 +400,47 @@ def _parse_removed(raw):
 	return rows if isinstance(rows, list) else []
 
 
+def _removed_roll_entry(batch_no, party_code="", item_code="", removed_by="", removed_at=""):
+	return {
+		"batch_no": (batch_no or "").strip(),
+		"party_code": (party_code or "").strip(),
+		"item_code": (item_code or "").strip(),
+		"removed_by": (removed_by or "").strip(),
+		"removed_at": (removed_at or "").strip(),
+	}
+
+
+def _insert_removed_roll_log(doctype, name, entry):
+	if not frappe.db.exists("DocType", "Removed Roll Log"):
+		frappe.throw(_("Removed roll log is not installed. Run bench migrate."))
+	if not frappe.db.table_exists("Removed Roll Log"):
+		frappe.throw(_("Removed roll log table is missing. Run bench migrate."))
+	already = frappe.db.exists(
+		"Removed Roll Log",
+		{
+			"reference_doctype": doctype,
+			"reference_name": name,
+			"batch_no": entry["batch_no"],
+			"removed_at": entry["removed_at"],
+		},
+	)
+	if already:
+		return
+	doc = frappe.get_doc(
+		{
+			"doctype": "Removed Roll Log",
+			"reference_doctype": doctype,
+			"reference_name": name,
+			"batch_no": entry["batch_no"],
+			"party_code": entry["party_code"],
+			"item_code": entry["item_code"],
+			"removed_by": entry["removed_by"],
+			"removed_at": entry["removed_at"] or now_datetime(),
+		}
+	)
+	doc.insert(ignore_permissions=True)
+
+
 def log_removed_roll(doctype, name, batch_no, party_code="", item_code=""):
 	"""Append one confirmed un-scan. Called from the scan APIs after the roll is cleared."""
 	doctype = (doctype or "").strip()
@@ -380,47 +448,61 @@ def log_removed_roll(doctype, name, batch_no, party_code="", item_code=""):
 	batch_no = (batch_no or "").strip()
 	if doctype not in ALLOWED_DOCTYPES or not name or not batch_no:
 		return
-	if not ensure_loading_fields():
-		return
-	if not frappe.db.has_column(doctype, "custom_removed_rolls"):
+	entry = _removed_roll_entry(
+		batch_no,
+		party_code,
+		item_code,
+		frappe.session.user,
+		str(now_datetime()),
+	)
+	_insert_removed_roll_log(doctype, name, entry)
+	if not ensure_loading_fields() or not _column_exists(doctype, "custom_removed_rolls"):
 		return
 	rows = _parse_removed(frappe.db.get_value(doctype, name, "custom_removed_rolls"))
-	rows.append(
-		{
-			"batch_no": batch_no,
-			"party_code": (party_code or "").strip(),
-			"item_code": (item_code or "").strip(),
-			"removed_by": frappe.session.user,
-			"removed_at": str(now_datetime()),
-		}
-	)
-	frappe.db.set_value(
-		doctype,
-		name,
-		"custom_removed_rolls",
-		json.dumps(rows),
-		update_modified=False,
-	)
+	rows.append(entry)
+	payload = json.dumps(rows)
+	frappe.db.set_value(doctype, name, "custom_removed_rolls", payload, update_modified=False)
+	frappe.clear_document_cache(doctype, name)
+
+
+def _removed_roll_log_rows(doctype, name):
+	if not frappe.db.exists("DocType", "Removed Roll Log") or not frappe.db.table_exists("Removed Roll Log"):
+		return []
+	return frappe.get_all(
+		"Removed Roll Log",
+		filters={"reference_doctype": doctype, "reference_name": name},
+		fields=["batch_no", "party_code", "item_code", "removed_by", "removed_at"],
+		order_by="removed_at asc",
+		limit_page_length=0,
+		ignore_permissions=True,
+	) or []
 
 
 @frappe.whitelist()
 def get_removed_rolls(doctype=None, name=None):
 	doctype, name = _require(doctype, name, "read")
 	ensure_loading_fields()
-	if not frappe.db.has_column(doctype, "custom_removed_rolls"):
-		return {"rolls": []}
-	rows = _parse_removed(frappe.db.get_value(doctype, name, "custom_removed_rolls"))
+	rows = []
+	if _column_exists(doctype, "custom_removed_rolls"):
+		rows.extend(_parse_removed(frappe.db.get_value(doctype, name, "custom_removed_rolls")))
+	rows.extend(_removed_roll_log_rows(doctype, name))
 	clean = []
+	seen = set()
 	for row in rows:
 		if not isinstance(row, dict):
 			continue
-		clean.append(
-			{
-				"batch_no": (row.get("batch_no") or "").strip(),
-				"party_code": (row.get("party_code") or "").strip(),
-				"item_code": (row.get("item_code") or "").strip(),
-				"removed_by": (row.get("removed_by") or "").strip(),
-				"removed_at": (row.get("removed_at") or "").strip(),
-			}
+		entry = _removed_roll_entry(
+			row.get("batch_no"),
+			row.get("party_code"),
+			row.get("item_code"),
+			row.get("removed_by"),
+			str(row.get("removed_at") or ""),
 		)
+		if not entry["batch_no"]:
+			continue
+		key = (entry["batch_no"], entry["removed_at"])
+		if key in seen:
+			continue
+		seen.add(key)
+		clean.append(entry)
 	return {"rolls": clean}
