@@ -394,6 +394,12 @@
                   :disabled="!canOpenMixingSheet"
                   @click="openBreakdownDialog"
                 >Breakdown</button>
+                <button
+                  type="button"
+                  class="gpe-btn"
+                  :disabled="!canOpenMixingSheet"
+                  @click="openKapadaUsageDialog"
+                >Kapada Usage</button>
               </div>
               <div v-if="shiftOpened && sessionSprList.length" class="gpe-wastage-recycle-btns">
                 <button
@@ -1950,6 +1956,7 @@ import {
 } from "./gsm_wastage_recycle_dialog.js";
 import { openGsmMixingSheetDialog } from "./gsm_mixing_sheet_dialog.js";
 import { openGsmBreakdownDialog } from "./gsm_breakdown_dialog.js";
+import { openGsmKapadaUsageDialog } from "./gsm_kapada_usage_dialog.js";
 import { openGsmLotSampleDialog } from "./gsm_lot_sample_dialog.js";
 import { openGsmShiftConsumablesDialog } from "./gsm_shift_consumables_dialog.js";
 import {
@@ -5609,6 +5616,15 @@ function openMixingDialog() {
 
 function openBreakdownDialog() {
   openGsmBreakdownDialog({
+    headerUnit: headerUnit.value || filterUnit.value,
+    runDate: runDate.value,
+    shift: shift.value,
+    shiftSessionId: shiftSession.value?.name || "",
+  });
+}
+
+function openKapadaUsageDialog() {
+  openGsmKapadaUsageDialog({
     headerUnit: headerUnit.value || filterUnit.value,
     runDate: runDate.value,
     shift: shift.value,
