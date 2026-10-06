@@ -106,7 +106,7 @@ function _pendingHtml(rows) {
 		</tr></thead>
 		<tbody>${body}</tbody>
 	</table>
-	<p class="ku-note">${__("Balance Qty is the weight left for the next shift. Leave it 0 to use the full roll. Only the used weight is saved.")}</p>`;
+	<p class="ku-note">${__("Save keeps these rolls here. At the end of the shift, enter Balance Qty and Save again. Enter 0 to use the full roll. Only the used weight is recorded.")}</p>`;
 }
 
 export async function openGsmKapadaUsageDialog(opts = {}) {
@@ -137,6 +137,7 @@ export async function openGsmKapadaUsageDialog(opts = {}) {
 		const msg = res.message || {};
 		ctx.doc_name = msg.name || "";
 		saved = msg.rows || [];
+		pending = (msg.open_rows || []).map((row) => ({ ...row, balance_qty: "" }));
 	};
 
 	await load();
@@ -231,28 +232,29 @@ export async function openGsmKapadaUsageDialog(opts = {}) {
 		}
 		const rows = pending.map((row) => ({
 			batch_no: row.batch_no,
-			balance_qty: row.balance_qty === "" || row.balance_qty == null ? 0 : row.balance_qty,
+			balance_qty: row.balance_qty === "" || row.balance_qty == null ? "" : row.balance_qty,
 			quality: row.quality,
 			color: row.color,
 			gsm: row.gsm,
 			width: row.width,
+			qty: row.qty,
 		}));
 		const res = await frappe.call({
 			method: `${KAPADA_API}.save_kapada_usage`,
 			args: { ..._args(ctx), rows: JSON.stringify(rows) },
 			freeze: true,
-			freeze_message: __("Creating material issue…"),
+			freeze_message: __("Saving…"),
 		});
 		const msg = res.message || {};
 		ctx.doc_name = msg.name || ctx.doc_name;
 		saved = msg.rows || [];
-		pending = [];
+		pending = (msg.open_rows || []).map((row) => ({ ...row, balance_qty: "" }));
 		render();
 		const issued = (msg.issued_now || []).map((q) => _num(q).toFixed(3)).join(", ");
 		frappe.show_alert({
 			message: issued
 				? __("Material Issue {0} created for {1} kg.", [msg.stock_entry || "", issued])
-				: __("Kapada usage saved."),
+				: __("Scanned rolls saved. Enter balance qty at the end of the shift."),
 			indicator: "green",
 		});
 	}

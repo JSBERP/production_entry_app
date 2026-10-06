@@ -107,6 +107,33 @@ def _row_payload(row) -> dict:
 	}
 
 
+def _open_rows(doc) -> list:
+	raw = getattr(doc, "open_rolls", None) or "[]"
+	if isinstance(raw, list):
+		rows = raw
+	else:
+		try:
+			rows = json.loads(raw or "[]")
+		except Exception:
+			rows = []
+	clean = []
+	for row in rows if isinstance(rows, list) else []:
+		if not isinstance(row, dict) or not _cstr(row.get("batch_no")):
+			continue
+		clean.append(
+			{
+				"batch_no": _cstr(row.get("batch_no")),
+				"quality": _cstr(row.get("quality")),
+				"color": _cstr(row.get("color")),
+				"gsm": flt(row.get("gsm") or 0),
+				"width": flt(row.get("width") or 0),
+				"qty": flt(row.get("qty") or 0, 3),
+				"balance_qty": "",
+			}
+		)
+	return clean
+
+
 def _doc_payload(doc) -> dict:
 	return {
 		"name": doc.name,
@@ -116,6 +143,7 @@ def _doc_payload(doc) -> dict:
 		"gsm_shift_session": doc.gsm_shift_session or "",
 		"material_issue": doc.material_issue or "",
 		"rows": [_row_payload(r) for r in (doc.rolls or [])],
+		"open_rows": _open_rows(doc),
 	}
 
 
@@ -403,6 +431,7 @@ def get_kapada_usage(
 		"gsm_shift_session": _cstr(gsm_shift_session),
 		"material_issue": "",
 		"rows": [],
+		"open_rows": [],
 	}
 
 
@@ -415,7 +444,7 @@ def save_kapada_usage(
 	doc_name=None,
 	rows=None,
 ):
-	"""Issue only the used weight. Balance qty is not stored."""
+	"""Save scanned rolls without issuing. Issue only rows that have a balance qty."""
 	incoming = _parse_rows(rows)
 	doc = _get_or_create(
 		run_date=run_date,
@@ -424,23 +453,47 @@ def save_kapada_usage(
 		gsm_shift_session=gsm_shift_session,
 		name=doc_name,
 	)
-	already = {_cstr(r.batch_no) for r in (doc.rolls or []) if _cstr(getattr(r, "batch_no", None))}
+	issued_batches = {_cstr(r.batch_no) for r in (doc.rolls or []) if _cstr(getattr(r, "batch_no", None))}
+	open_keep = []
 	prepared = []
 	issue_lines = []
 	seen = set()
+	if not incoming:
+		frappe.throw(_("Scan a roll first."))
 	for raw in incoming:
 		if not isinstance(raw, dict):
 			continue
 		batch = _resolve_batch(raw.get("batch_no"))
 		batch_id = batch["batch_id"]
-		if batch_id in already or batch_id in seen:
-			frappe.throw(_("Roll {0} is already on this shift.").format(batch_id))
+		if batch_id in seen:
+			continue
 		seen.add(batch_id)
+		if batch_id in issued_batches:
+			frappe.throw(_("Roll {0} is already recorded for this shift.").format(batch_id))
+		balance_raw = raw.get("balance_qty")
+		spec_quality = _cstr(raw.get("quality"))
+		spec_color = _cstr(raw.get("color"))
+		spec_gsm = flt(raw.get("gsm") or 0)
+		spec_width = flt(raw.get("width") or 0)
+		if balance_raw in (None, ""):
+			stock_rows = _stock_rows(batch)
+			available = _available_qty(stock_rows) or flt(raw.get("qty") or 0, 3)
+			open_keep.append(
+				{
+					"batch_no": batch_id,
+					"quality": spec_quality,
+					"color": spec_color,
+					"gsm": spec_gsm,
+					"width": spec_width,
+					"qty": available,
+				}
+			)
+			continue
 		stock_rows = _stock_rows(batch)
 		available = _available_qty(stock_rows)
 		if available <= 0:
 			frappe.throw(_("Roll {0} has no balance left.").format(batch_id))
-		balance = flt(raw.get("balance_qty") or 0, 3)
+		balance = flt(balance_raw, 3)
 		if balance < 0:
 			frappe.throw(_("Balance qty for {0} cannot be negative.").format(batch_id))
 		if balance >= available:
@@ -457,20 +510,23 @@ def save_kapada_usage(
 		prepared.append(
 			{
 				"batch_no": batch_id,
-				"quality": spec.get("quality") or _cstr(raw.get("quality")),
-				"color": spec.get("color") or _cstr(raw.get("color")),
-				"gsm": flt(spec.get("gsm") or raw.get("gsm") or 0),
-				"width": flt(spec.get("width_inch") or raw.get("width") or 0),
+				"quality": spec.get("quality") or spec_quality,
+				"color": spec.get("color") or spec_color,
+				"gsm": flt(spec.get("gsm") or spec_gsm or 0),
+				"width": flt(spec.get("width_inch") or spec_width or 0),
 				"used_qty": used,
 			}
 		)
 		issue_lines.extend(_issue_lines(batch, used))
-	if not prepared:
+	if not open_keep and not prepared:
 		frappe.throw(_("Scan a roll first."))
-	stock_entry = _create_material_issue(issue_lines)
-	for row in prepared:
-		doc.append("rolls", row)
-	doc.material_issue = stock_entry
+	stock_entry = ""
+	if prepared:
+		stock_entry = _create_material_issue(issue_lines)
+		for row in prepared:
+			doc.append("rolls", row)
+		doc.material_issue = stock_entry
+	doc.open_rolls = json.dumps(open_keep)
 	doc.save(ignore_permissions=True)
 	frappe.db.commit()
 	payload = _doc_payload(doc)

@@ -12,6 +12,7 @@
   "column_break_1",
   "gsm_shift_session",
   "material_issue",
+  "open_rolls",
   "section_break_rows",
   "rolls"
  ],
@@ -64,6 +65,13 @@
    "fieldtype": "Link",
    "label": "Material Issue",
    "options": "Stock Entry",
+   "read_only": 1
+  },
+  {
+   "fieldname": "open_rolls",
+   "fieldtype": "Long Text",
+   "hidden": 1,
+   "label": "Open Rolls",
    "read_only": 1
   },
   {
