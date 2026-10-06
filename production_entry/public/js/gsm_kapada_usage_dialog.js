@@ -11,6 +11,25 @@ function _num(v) {
 	return Number.isFinite(n) ? n : 0;
 }
 
+function _scanValue(data) {
+	if (!data) return "";
+	if (typeof data === "string" || typeof data === "number") return String(data).trim();
+	if (Array.isArray(data)) {
+		for (const item of data) {
+			const val = _scanValue(item);
+			if (val) return val;
+		}
+		return "";
+	}
+	for (const key of ["decodedText", "result", "text", "rawValue", "barcode", "value", "data"]) {
+		if (data[key]) {
+			const val = _scanValue(data[key]);
+			if (val) return val;
+		}
+	}
+	return "";
+}
+
 function _args(ctx) {
 	return {
 		run_date: ctx.run_date || "",
@@ -132,18 +151,21 @@ export async function openGsmKapadaUsageDialog(opts = {}) {
 	const $body = $(`<div class="ku-wrap">
 		<style>
 			.ku-wrap { display:flex; flex-direction:column; gap:14px; }
-			.ku-scan { display:flex; align-items:center; gap:8px; border:1px solid #e2e8f0; border-radius:12px; padding:8px 12px; background:#f8fafc; }
-			.ku-scan input { border:0; background:transparent; flex:1; font-size:15px; outline:none; }
-			.ku-scan-icon { color:#64748b; font-size:18px; }
+			.ku-scan-row { display:flex; align-items:center; gap:8px; }
+			.ku-scan { display:flex; align-items:center; flex:1; border:1px solid #e2e8f0; border-radius:12px; padding:8px 12px; background:#f8fafc; }
+			.ku-scan input { border:0; background:transparent; width:100%; font-size:15px; outline:none; }
+			.ku-open-scan { white-space:nowrap; }
 			.ku-table { margin:0; font-size:12px; }
 			.ku-table th, .ku-table td { vertical-align:middle; text-align:center; }
 			.ku-empty, .ku-note { margin:0; color:#64748b; font-size:12px; }
 			.ku-section h5 { margin:0 0 6px; font-size:13px; }
 		</style>
-		<label class="ku-scan">
-			<input type="text" class="ku-barcode" placeholder="${__("Scan Barcode")}" autocomplete="off">
-			<span class="ku-scan-icon">▦</span>
-		</label>
+		<div class="ku-scan-row">
+			<label class="ku-scan">
+				<input type="text" class="ku-barcode" placeholder="${__("Scan Barcode or enter batch no")}" autocomplete="off">
+			</label>
+			<button type="button" class="btn btn-default ku-open-scan"><i class="fa fa-barcode"></i> ${__("Scan")}</button>
+		</div>
 		<div class="ku-section">
 			<h5>${__("This entry")}</h5>
 			<div class="ku-pending"></div>
@@ -242,9 +264,21 @@ export async function openGsmKapadaUsageDialog(opts = {}) {
 		$body.find(".ku-barcode").val("");
 		try {
 			await addBatch(value);
-		} catch (err) {
-			frappe.msgprint(err?.message || __("Could not fetch this roll."));
+		} catch (e) {
+			console.error(e);
 		}
+	});
+	$body.on("click", ".ku-open-scan", () => {
+		const scanner = new frappe.ui.Scanner({
+			dialog: true,
+			multiple: false,
+			on_scan(raw) {
+				const value = _scanValue(raw);
+				if (scanner.stop_scan) scanner.stop_scan();
+				if (!value) return;
+				addBatch(value).catch((e) => console.error(e));
+			},
+		});
 	});
 	$body.on("click", ".ku-remove", function () {
 		readPending();

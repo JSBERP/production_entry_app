@@ -141,22 +141,132 @@ def _batch_keys(batch: dict) -> list:
 	return [k for k in dict.fromkeys([_cstr(batch.get("batch_id")), _cstr(batch.get("name"))]) if k]
 
 
-def _stock_rows(batch: dict) -> list:
-	keys = _batch_keys(batch)
+def _positive_rows(rows) -> list:
+	clean = []
+	for row in rows or []:
+		qty = flt(row.get("qty") or 0, 3)
+		warehouse = _cstr(row.get("warehouse"))
+		item_code = _cstr(row.get("item_code"))
+		if qty > 0.0001 and warehouse and item_code:
+			clean.append({"item_code": item_code, "warehouse": warehouse, "qty": qty})
+	clean.sort(key=lambda r: r["qty"], reverse=True)
+	return clean
+
+
+def _classic_sle_rows(keys) -> list:
 	if not keys:
 		return []
-	return frappe.db.sql(
+	return _positive_rows(
+		frappe.db.sql(
+			"""
+			SELECT item_code, warehouse, SUM(actual_qty) AS qty
+			FROM `tabStock Ledger Entry`
+			WHERE batch_no IN %(batches)s AND IFNULL(is_cancelled, 0) = 0
+			GROUP BY item_code, warehouse
+			HAVING SUM(actual_qty) > 0.0001
+			""",
+			{"batches": tuple(keys)},
+			as_dict=True,
+		)
+	)
+
+
+def _bundle_sle_rows(keys) -> list:
+	if not keys or not frappe.db.exists("DocType", "Serial and Batch Entry"):
+		return []
+	if not frappe.get_meta("Stock Ledger Entry").has_field("serial_and_batch_bundle"):
+		return []
+	meta = frappe.get_meta("Serial and Batch Entry")
+	batch_field = next((fn for fn in ("batch_no", "batch", "batch_id") if meta.has_field(fn)), "")
+	qty_field = next((fn for fn in ("qty", "quantity") if meta.has_field(fn)), "")
+	if not batch_field or not qty_field:
+		return []
+	return _positive_rows(
+		frappe.db.sql(
+			f"""
+			SELECT sle.item_code AS item_code, sle.warehouse AS warehouse,
+				SUM(CASE WHEN IFNULL(sle.actual_qty, 0) < 0
+					THEN -ABS(IFNULL(sbe.`{qty_field}`, 0))
+					ELSE ABS(IFNULL(sbe.`{qty_field}`, 0)) END) AS qty
+			FROM `tabStock Ledger Entry` sle
+			INNER JOIN `tabSerial and Batch Entry` sbe
+				ON sbe.parent = sle.serial_and_batch_bundle
+			WHERE IFNULL(sle.is_cancelled, 0) = 0
+			  AND IFNULL(sle.serial_and_batch_bundle, '') != ''
+			  AND IFNULL(sbe.`{batch_field}`, '') IN %(batches)s
+			GROUP BY sle.item_code, sle.warehouse
+			HAVING qty > 0.0001
+			""",
+			{"batches": tuple(keys)},
+			as_dict=True,
+		)
+	)
+
+
+def _erpnext_batch_rows(batch: dict) -> list:
+	item_code = _cstr(batch.get("item_code"))
+	try:
+		from erpnext.stock.doctype.batch.batch import get_batch_qty
+	except Exception:
+		return []
+	rows = []
+	for batch_no in _batch_keys(batch):
+		try:
+			data = get_batch_qty(batch_no=batch_no, item_code=item_code or None)
+		except Exception:
+			continue
+		if isinstance(data, (int, float)):
+			continue
+		for entry in data or []:
+			if isinstance(entry, dict):
+				rows.append(
+					{
+						"item_code": _cstr(entry.get("item_code") or item_code),
+						"warehouse": _cstr(entry.get("warehouse")),
+						"qty": flt(entry.get("qty") or 0),
+					}
+				)
+	return _positive_rows(rows)
+
+
+def _batch_master_rows(batch: dict) -> list:
+	item_code = _cstr(batch.get("item_code"))
+	qty = flt(frappe.db.get_value("Batch", batch.get("name"), "batch_qty") or 0, 3)
+	if qty <= 0 or not item_code:
+		return []
+	warehouses = frappe.db.sql(
 		"""
-		SELECT item_code, warehouse, SUM(actual_qty) AS qty
+		SELECT warehouse, SUM(actual_qty) AS qty
 		FROM `tabStock Ledger Entry`
-		WHERE batch_no IN %(batches)s AND is_cancelled = 0
-		GROUP BY item_code, warehouse
+		WHERE item_code = %(item_code)s AND IFNULL(is_cancelled, 0) = 0
+		GROUP BY warehouse
 		HAVING SUM(actual_qty) > 0.0001
 		ORDER BY SUM(actual_qty) DESC
 		""",
-		{"batches": keys},
+		{"item_code": item_code},
 		as_dict=True,
 	) or []
+	if not warehouses:
+		return []
+	warehouse = _cstr(warehouses[0].get("warehouse"))
+	for row in warehouses:
+		if "finished goods" in _cstr(row.get("warehouse")).lower():
+			warehouse = _cstr(row.get("warehouse"))
+			break
+	if not warehouse:
+		return []
+	return [{"item_code": item_code, "warehouse": warehouse, "qty": qty}]
+
+
+def _stock_rows(batch: dict) -> list:
+	for finder in (_classic_sle_rows, _bundle_sle_rows):
+		rows = finder(_batch_keys(batch))
+		if rows:
+			return rows
+	rows = _erpnext_batch_rows(batch)
+	if rows:
+		return rows
+	return _batch_master_rows(batch)
 
 
 def _roll_spec(batch_no: str, item_code: str) -> dict:
