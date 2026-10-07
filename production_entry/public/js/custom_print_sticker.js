@@ -125,10 +125,19 @@ function print_from_label_template(row, frm, spec, details) {
     var fields = (spec && spec.fields) || {};
     var f = frm || cur_frm;
     var doc = (f && f.doc) || {};
+    var customerId = String(
+        row.customer ||
+        doc.customer ||
+        row.custom_customer ||
+        doc.custom_customer ||
+        ""
+    ).trim();
+    var directName = String(row.customer_name || doc.customer_name || "").trim();
     var type = String(spec.base_template || spec.label_name || spec.name || "").toLowerCase();
     var isReliance = type.indexOf("reliance") !== -1 || type.indexOf("relience") !== -1;
     var widthNum = parseFloat(row.width_inch || 0) || 0;
     var widthVal = isReliance ? (widthNum * 2.54).toFixed(2) + " Cms" : (widthNum || "") + " Inches";
+    function openLabel(customerName) {
     var d = {
         company: "JAYASHREE SPUN BOND",
         process: "NON WOVEN FABRICS",
@@ -143,7 +152,7 @@ function print_from_label_template(row, frm, spec, details) {
         batch_no: row.batch_no || "",
         roll_no: row.roll_no || "",
         order_code: row.party_code || doc.custom_order_code || doc.order_code || "",
-        customer_name: row.customer_name || doc.customer_name || "",
+        customer_name: String(customerName || directName || "").trim(),
         sheet_size: row.sheet_size || "",
         total_sheets: row.total_sheets || row.no_of_sheets || ""
     };
@@ -228,6 +237,12 @@ function print_from_label_template(row, frm, spec, details) {
     if (pw) {
         pw.document.write(html);
         pw.document.close();
+    }
+    }
+    if (lt_flag(fields, "show_customer", 0) && customerId) {
+        fetch_customer_display_name(customerId, openLabel);
+    } else {
+        openLabel(directName);
     }
 }
 
