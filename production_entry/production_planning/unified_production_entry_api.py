@@ -4808,7 +4808,66 @@ def get_warehouse_bays_for_unit(unit=None):
 				"description": _cstr(r.get("description")),
 			}
 		)
-	return out
+	return _with_common_bays(token, out, seen)
+
+
+def _common_bay_names_for_unit(token):
+	"""JC and TC are open areas, not racks. Units 1–3 use both; Unit 4 uses TC."""
+	if token in ("UNIT 1", "UNIT 2", "UNIT 3"):
+		return ["JC", "TC"]
+	if token == "UNIT 4":
+		return ["TC"]
+	return []
+
+
+def _ensure_common_warehouse_bay(bay_name):
+	labels = {"JC": "Jayashree Common", "TC": "Thusmaa Common"}
+	existing = frappe.db.get_value(
+		"Warehouse Bay",
+		{"bay_name": bay_name},
+		["name", "bay_name", "description"],
+		as_dict=True,
+	)
+	if existing:
+		return existing
+	try:
+		doc = frappe.get_doc(
+			{
+				"doctype": "Warehouse Bay",
+				"bay_name": bay_name,
+				"description": labels.get(bay_name, bay_name),
+			}
+		)
+		doc.insert(ignore_permissions=True)
+		frappe.db.commit()
+		return {
+			"name": doc.name,
+			"bay_name": doc.bay_name,
+			"description": doc.description,
+		}
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "ensure common warehouse bay")
+		return None
+
+
+def _with_common_bays(token, out, seen):
+	common = []
+	for bay_name in _common_bay_names_for_unit(token):
+		if bay_name in seen:
+			continue
+		row = _ensure_common_warehouse_bay(bay_name)
+		if not row:
+			continue
+		bn = _cstr(row.get("bay_name") or row.get("name") or bay_name)
+		seen.add(bn)
+		common.append(
+			{
+				"name": _cstr(row.get("name") or bn),
+				"bay_name": bn,
+				"description": _cstr(row.get("description")),
+			}
+		)
+	return common + out
 
 
 @frappe.whitelist(methods=["GET", "POST"])
