@@ -248,6 +248,11 @@ function batchSummary(row) {
 
 function statusLabel(row) {
   const st = String(row.despatch_status || "").trim();
+  const stLc = st.toLowerCase();
+  // Prior lot approved/despatched but remaining rolls can still be picked
+  if (row.can_despatch && (stLc === "approved" || stLc === "despatched")) {
+    return "Balance ready";
+  }
   if (st) return st;
   if (!row.can_despatch) return row.despatch_block_reason || "Blocked";
   return "Ready";
@@ -256,6 +261,7 @@ function statusLabel(row) {
 function statusClass(row) {
   const st = String(row.despatch_status || "").toLowerCase();
   if (st === "pending approval" || st === "draft") return "tl-warn";
+  if (row.can_despatch && (st === "approved" || st === "despatched")) return "tl-ok";
   if (st === "approved" || st === "despatched" || st === "draft dn") return "tl-transferred";
   return row.can_despatch ? "tl-ok" : "tl-block";
 }

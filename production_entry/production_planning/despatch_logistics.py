@@ -178,12 +178,19 @@ def _order_approval_cards(cards, from_company, scope):
 
 
 def _despatch_status_blocks_request(status):
+	"""Block only in-flight requests — allow balance despatch after Approved/Despatched.
+
+	Batches already on a non-rejected Despatch Approval stay reserved via
+	`_batches_reserved_on_despatch`, so operators can submit remaining rolls.
+	"""
 	st = _cstr(status).strip().lower()
 	if not st:
 		return False
 	if st == "rejected":
 		return False
-	if st in {"pending approval", "approved", "draft", "draft dn", "despatched"}:
+	# Pending / Draft / Draft DN = request still open — finish or reject first.
+	# Approved / Despatched = prior lot done — allow another request for balance.
+	if st in {"pending approval", "draft", "draft dn"}:
 		return True
 	return False
 
@@ -1247,9 +1254,10 @@ def create_despatch_approval_request(from_company=None, lines=None):
 			st = _resolved_planning_row_despatch_status(ptr, "")
 			if _despatch_status_blocks_request(st):
 				frappe.throw(
-					_("Row {0} already has despatch status: {1}. Reject the approval to request again.").format(
-						ptr, st
-					)
+					_(
+						"Row {0} has despatch status: {1}. "
+						"Approve or Reject the open request before submitting the balance."
+					).format(ptr, st)
 				)
 		bn = _cstr(line.get("batch_no"))
 		if not bn:
